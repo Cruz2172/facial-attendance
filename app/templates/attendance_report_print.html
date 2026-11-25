@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Attendance Report - {{ course.course_code }}</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            color: #1a1a1a;
+            max-width: 900px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .toolbar {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .btn {
+            padding: 8px 18px;
+            border-radius: 6px;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn-print { background: #2563eb; color: #fff; }
+        .btn-back { background: #e5e7eb; color: #111; text-decoration: none; display: inline-block; }
+
+        .report-header {
+            border-bottom: 3px solid #2563eb;
+            padding-bottom: 16px;
+            margin-bottom: 24px;
+        }
+        .report-header h1 {
+            margin: 0 0 4px 0;
+            font-size: 22px;
+        }
+        .report-header .subtitle {
+            color: #555;
+            font-size: 14px;
+            margin: 2px 0;
+        }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .meta-box {
+            background: #f3f4f6;
+            border-radius: 8px;
+            padding: 12px 14px;
+        }
+        .meta-box .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #666;
+            letter-spacing: 0.05em;
+        }
+        .meta-box .value {
+            font-size: 20px;
+            font-weight: 700;
+            margin-top: 2px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 9px 10px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background: #2563eb;
+            color: #fff;
+            font-weight: 600;
+        }
+        tr:nth-child(even) { background: #f9fafb; }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 12px;
+            color: #fff;
+            min-width: 52px;
+            text-align: center;
+        }
+        .badge-danger  { background: #dc2626; }
+        .badge-warning { background: #d97706; }
+        .badge-success { background: #16a34a; }
+        .badge-secondary { background: #6b7280; }
+
+        .empty-note {
+            padding: 30px;
+            text-align: center;
+            color: #777;
+            border: 1px dashed #ccc;
+            border-radius: 8px;
+        }
+
+        .footer-note {
+            margin-top: 24px;
+            font-size: 11px;
+            color: #888;
+            text-align: right;
+        }
+
+        @media print {
+            .toolbar { display: none !important; }
+            body { margin: 0; padding: 0 10px; }
+            a { color: inherit; text-decoration: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="toolbar">
+        <a href="{{ url_for('courses.attendance_report') }}" class="btn btn-back">← Back to Report</a>
+        <button class="btn btn-print" onclick="window.print()">🖨️ Print</button>
+    </div>
+
+    <div class="report-header">
+        <h1>Attendance Report</h1>
+        <div class="subtitle">{{ course.course_code }} — {{ course.course_name }}</div>
+        <div class="subtitle">Instructor: {{ course.get_teacher_name() }}</div>
+        {% if course.schedule %}<div class="subtitle">Schedule: {{ course.schedule }}</div>{% endif %}
+    </div>
+
+    <div class="meta-grid">
+        <div class="meta-box">
+            <div class="label">Total Sessions Held</div>
+            <div class="value">{{ total_sessions }}</div>
+        </div>
+        <div class="meta-box">
+            <div class="label">Students Enrolled</div>
+            <div class="value">{{ student_rows|length }}</div>
+        </div>
+        <div class="meta-box">
+            <div class="label">Report Generated</div>
+            <div class="value" style="font-size:15px;">{{ generated_at.strftime('%b %d, %Y %I:%M %p') }}</div>
+        </div>
+    </div>
+
+    {% if student_rows %}
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Student ID</th>
+                <th>Full Name</th>
+                <th>Email</th>
+                <th>Attended</th>
+                <th>Total Sessions</th>
+                <th>Attendance %</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in student_rows %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ row.student_id }}</td>
+                <td>{{ row.fullname }}</td>
+                <td>{{ row.email }}</td>
+                <td>{{ row.attended }}</td>
+                <td>{{ row.total }}</td>
+                <td>
+                    <span class="badge badge-{{ attendance_badge_class(row.percentage) }}">
+                        {{ row.percentage }}%
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-note">No face-enrolled students found for this course yet.</div>
+    {% endif %}
+
+    <div class="footer-note">
+        Legend: <span class="badge badge-danger">&lt;50%</span>
+        <span class="badge badge-warning">50–74.99%</span>
+        <span class="badge badge-success">≥75%</span>
+    </div>
+
+</body>
+</html>

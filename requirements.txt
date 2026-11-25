@@ -1,0 +1,34 @@
+# Flask core
+Flask==3.0.3
+Werkzeug==3.0.3
+
+# Production server
+gunicorn==22.0.0
+
+# Database
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.31
+psycopg2-binary==2.9.9
+
+# Forms / CSRF
+Flask-WTF==1.2.1
+WTForms==3.1.2
+
+# Rate limiting (add `redis==5.0.8` and set RATELIMIT_STORAGE_URI=redis://... to share limits across workers)
+Flask-Limiter==3.8.0
+
+# CORS (only active if CORS_ORIGINS is set)
+Flask-CORS==4.0.1
+
+# Environment variables / timezones
+python-dotenv==1.0.1
+tzdata==2024.1
+
+# Face recognition
+face_recognition==1.3.0
+face_recognition_models==0.3.0
+dlib==20.0.1
+# headless build: the regular opencv-python needs libGL and fails on servers/containers
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+Pillow==10.4.0

@@ -1,0 +1,615 @@
+{% extends "base.html" %}
+
+{% block title %}{{ selected_course.course_code }} - Mark Attendance - FaceAttend{% endblock %}
+
+{% block extra_css %}
+<style>
+    .video-container {
+        background: #000;
+        border-radius: 15px;
+        overflow: hidden;
+        min-height: 400px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+    }
+    .video-container video {
+        width: 100%;
+        display: none;
+    }
+    .video-container canvas {
+        display: none;
+    }
+    .video-container .placeholder {
+        color: #858796;
+        text-align: center;
+        padding: 2rem;
+    }
+    .video-container .placeholder i {
+        font-size: 4rem;
+        color: #dddfeb;
+        margin-bottom: 1rem;
+        display: block;
+    }
+    .video-container .loading {
+        display: none;
+        text-align: center;
+        padding: 2rem;
+    }
+    .video-container .loading .spinner-border {
+        width: 3rem;
+        height: 3rem;
+    }
+    .video-container .scan-indicator {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        background: rgba(0,0,0,0.55);
+        color: #fff;
+        padding: 4px 12px;
+        border-radius: 50px;
+        font-size: 0.8rem;
+        display: none;
+        align-items: center;
+        gap: 6px;
+    }
+    .video-container .scan-indicator.show {
+        display: flex;
+    }
+    .video-container .scan-indicator .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #28a745;
+        animation: pulse 1.2s infinite;
+    }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.25; }
+        100% { opacity: 1; }
+    }
+    .camera-controls {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+    }
+    .camera-controls .btn {
+        border-radius: 50px;
+        padding: 0.5rem 1.5rem;
+    }
+    .recognition-result {
+        margin-top: 1rem;
+        padding: 1rem;
+        border-radius: 10px;
+        display: none;
+    }
+    .recognition-result.show {
+        display: block;
+    }
+    .recognition-result.success {
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        color: #155724;
+    }
+    .recognition-result.error {
+        background: #f8d7da;
+        border: 1px solid #f5c6cb;
+        color: #721c24;
+    }
+    .recognition-result.info {
+        background: #d1ecf1;
+        border: 1px solid #bee5eb;
+        color: #0c5460;
+    }
+    .recognition-result.warning {
+        background: #fff3cd;
+        border: 1px solid #ffe69c;
+        color: #664d03;
+    }
+    .just-marked-list {
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    .just-marked-list .list-group-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn {
+        from { opacity: 0; transform: translateY(-8px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .just-marked-list .list-group-item .time {
+        font-size: 0.8rem;
+        color: #858796;
+    }
+    .session-status {
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .session-status.active {
+        background: #d4edda;
+        color: #155724;
+    }
+    .session-status.closed {
+        background: #e2e3e5;
+        color: #383d41;
+    }
+    .waiting-state {
+        text-align: center;
+        padding: 2.5rem 1.5rem;
+    }
+    .waiting-state i {
+        font-size: 3rem;
+        color: #667eea;
+        margin-bottom: 1rem;
+        display: block;
+    }
+    @media (max-width: 768px) {
+        .video-container {
+            min-height: 250px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <a href="{{ url_for('legacy.mark_attendance') }}" class="text-decoration-none mb-2 d-inline-block">
+                <i class="fas fa-arrow-left me-1"></i> Back to courses
+            </a>
+            <h1 class="mb-4"><i class="fas fa-check-circle text-primary me-2"></i>Mark Attendance</h1>
+        </div>
+    </div>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ 'danger' if category == 'error' else 'success' if category == 'success' else 'warning' }} alert-dismissible fade show">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <!-- Session Status -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap">
+                        <div>
+                            <h5 class="mb-0">
+                                <i class="fas fa-video text-primary me-2"></i>
+                                {{ selected_course.course_code }} - {{ selected_course.course_name }}
+                            </h5>
+                            <small class="text-muted">
+                                <i class="fas fa-users me-1"></i>
+                                {{ selected_course.get_enrolled_count() }} students enrolled
+                                {% if user.role in ('teacher', 'admin') %}
+                                    <span class="ms-3">
+                                        <i class="fas fa-chalkboard-teacher me-1"></i>
+                                        You are the instructor
+                                    </span>
+                                {% endif %}
+                            </small>
+                        </div>
+                        <div class="d-flex align-items-center flex-wrap">
+                            {% if active_session %}
+                                <span class="session-status active">
+                                    <i class="fas fa-circle me-1"></i> Active Session
+                                </span>
+                                {% if user.role in ('teacher', 'admin') %}
+                                <form method="POST"
+                                      action="{{ url_for('courses.end_attendance_session', session_id=active_session.id) }}"
+                                      class="d-inline ms-2">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm"
+                                            onclick="return confirm('End this attendance session? The camera will stop and no further students can be marked.');">
+                                        <i class="fas fa-stop-circle me-1"></i> End Session
+                                    </button>
+                                </form>
+                                {% endif %}
+                            {% else %}
+                                <span class="session-status closed">
+                                    <i class="fas fa-circle me-1"></i> No Active Session
+                                </span>
+                                {% if user.role in ('teacher', 'admin') %}
+                                <a href="{{ url_for('courses.start_attendance_session', course_id=selected_course.id) }}"
+                                   class="btn btn-success btn-sm ms-2">
+                                    <i class="fas fa-play me-1"></i> Start Session
+                                </a>
+                                {% else %}
+                                <span class="badge bg-secondary ms-2">
+                                    <i class="fas fa-hourglass-half me-1"></i> Waiting for teacher to start a session
+                                </span>
+                                {% endif %}
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if user.role in ('teacher', 'admin') %}
+        <!-- ============================================ -->
+        <!-- TEACHER/ADMIN VIEW: this is the only place the camera ever
+             renders. It runs on the teacher's own device and continuously
+             scans whoever steps in front of it against this course's
+             roster. Students never see a camera or interact with this
+             endpoint at all. -->
+        <!-- ============================================ -->
+        {% if active_session %}
+        <div class="row">
+            <div class="col-lg-7">
+                <div class="card">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-0"><i class="fas fa-camera text-primary me-2"></i>Live Attendance Scanner</h5>
+                        <small class="text-muted d-block mt-1">
+                            <i class="fas fa-info-circle me-1"></i>
+                            Point this camera at the class. Each enrolled student is marked present
+                            automatically as they look at it — nothing needs to be shared with them.
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <div class="video-container">
+                            <video id="attendanceVideo" autoplay muted playsinline></video>
+                            <canvas id="attendanceCanvas"></canvas>
+                            <div id="videoPlaceholder" class="placeholder">
+                                <i class="fas fa-camera"></i>
+                                <p>Click "Start Camera" to begin scanning</p>
+                                <small>Position the camera so students can look into it one at a time</small>
+                            </div>
+                            <div id="cameraLoading" class="loading">
+                                <div class="spinner-border text-primary"></div>
+                                <p class="mt-2">Accessing camera...</p>
+                            </div>
+                            <div id="scanIndicator" class="scan-indicator">
+                                <span class="dot"></span> Scanning
+                            </div>
+                        </div>
+                        <div class="camera-controls">
+                            <button type="button" id="startCameraBtn" class="btn btn-primary">
+                                <i class="fas fa-play me-1"></i> Start Camera
+                            </button>
+                            <button type="button" id="stopCameraBtn" class="btn btn-danger" disabled>
+                                <i class="fas fa-stop me-1"></i> Stop Camera
+                            </button>
+                        </div>
+
+                        <div id="recognitionResult" class="recognition-result"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-5">
+                <!-- Just Marked -->
+                <div class="card">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-clock text-primary me-2"></i>Just Marked</h5>
+                        <span class="badge bg-primary" id="justMarkedCount">{{ recent_attendance|length }}</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="just-marked-list" id="justMarkedList">
+                            {% if recent_attendance %}
+                                <div class="list-group list-group-flush">
+                                    {% for record in recent_attendance %}
+                                        <div class="list-group-item">
+                                            <div>
+                                                <strong>{{ record.student_name }}</strong>
+                                                <br>
+                                                <small class="text-muted">
+                                                    <i class="fas fa-calendar-alt me-1"></i>
+                                                    {{ record.date }}
+                                                </small>
+                                            </div>
+                                            <div class="text-end">
+                                                <span class="badge bg-success">Present</span>
+                                                <br>
+                                                <small class="time">{{ record.time }}</small>
+                                            </div>
+                                        </div>
+                                    {% endfor %}
+                                </div>
+                            {% else %}
+                                <div class="text-center py-4" id="noAttendanceYet">
+                                    <i class="fas fa-clock fa-3x text-muted mb-3"></i>
+                                    <p class="text-muted">No one marked present yet</p>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Instructions -->
+                <div class="card mt-3">
+                    <div class="card-body">
+                        <h6><i class="fas fa-info-circle text-primary me-2"></i>How This Works</h6>
+                        <ol class="small text-muted mb-0">
+                            <li>Click "Start Camera" once, at the front of the room</li>
+                            <li>Students look at the camera one at a time as they arrive</li>
+                            <li>Each enrolled, face-registered student is marked present automatically</li>
+                            <li>Click "Stop Camera" when done, or "End Session" to close attendance entirely</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body waiting-state">
+                        <i class="fas fa-hourglass-half"></i>
+                        <h5>No Active Attendance Session</h5>
+                        <p class="text-muted">
+                            Start a session for {{ selected_course.course_code }}, then come back here to
+                            scan your class.
+                        </p>
+                        <a href="{{ url_for('courses.start_attendance_session', course_id=selected_course.id) }}"
+                           class="btn btn-success mt-2">
+                            <i class="fas fa-play me-2"></i> Start Session
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    {% else %}
+        <!-- ============================================ -->
+        <!-- STUDENT VIEW: informational only. Students never see a camera
+             or a token/link here — attendance for a session is entirely
+             run by the teacher on their own device. -->
+        <!-- ============================================ -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body waiting-state">
+                        {% if active_session %}
+                            <i class="fas fa-video text-success"></i>
+                            <h5>Attendance In Progress</h5>
+                            <p class="text-muted mb-0">
+                                Your teacher is marking attendance for {{ selected_course.course_code }} using
+                                the classroom camera right now. There's nothing you need to do here — just
+                                make sure you're visible when it's your turn to look at the camera.
+                            </p>
+                        {% else %}
+                            <i class="fas fa-hourglass-half"></i>
+                            <h5>No Active Attendance Session</h5>
+                            <p class="text-muted mb-0">
+                                Your teacher hasn't started an attendance session for
+                                {{ selected_course.course_code }} yet. Attendance is marked automatically by
+                                your teacher during class — you don't need to do anything here.
+                            </p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Camera only ever initializes for teacher/admin with an active
+    // session — matches the server-side gating above exactly.
+    {% if user.role in ('teacher', 'admin') and active_session %}
+    const video = document.getElementById('attendanceVideo');
+    const canvas = document.getElementById('attendanceCanvas');
+    const startBtn = document.getElementById('startCameraBtn');
+    const stopBtn = document.getElementById('stopCameraBtn');
+    const videoPlaceholder = document.getElementById('videoPlaceholder');
+    const cameraLoading = document.getElementById('cameraLoading');
+    const scanIndicator = document.getElementById('scanIndicator');
+    const resultDiv = document.getElementById('recognitionResult');
+    const justMarkedList = document.getElementById('justMarkedList');
+    const justMarkedCount = document.getElementById('justMarkedCount');
+    const sessionId = "{{ active_session.id }}";
+
+    const SCAN_INTERVAL_MS = 2500;
+
+    let stream = null;
+    let isRunning = false;
+    let isProcessing = false;
+    let scanTimer = null;
+    let lastAnnouncedKey = null;
+    let markedCount = {{ recent_attendance|length }};
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        resultDiv.className = 'recognition-result show error';
+        resultDiv.innerHTML = '<i class="fas fa-exclamation-circle me-2"></i>Camera not supported in this browser. Please use a modern browser, and make sure the page is loaded over HTTPS (or localhost).';
+        startBtn.disabled = true;
+        return;
+    }
+
+    function setStatus(className, html) {
+        resultDiv.className = 'recognition-result show ' + className;
+        resultDiv.innerHTML = html;
+    }
+
+    function addJustMarked(name, time) {
+        const emptyState = document.getElementById('noAttendanceYet');
+        if (emptyState) emptyState.remove();
+
+        let listGroup = justMarkedList.querySelector('.list-group');
+        if (!listGroup) {
+            listGroup = document.createElement('div');
+            listGroup.className = 'list-group list-group-flush';
+            justMarkedList.appendChild(listGroup);
+        }
+
+        const item = document.createElement('div');
+        item.className = 'list-group-item';
+        item.innerHTML =
+            '<div><strong>' + name + '</strong></div>' +
+            '<div class="text-end">' +
+                '<span class="badge bg-success">Present</span><br>' +
+                '<small class="time">' + time + '</small>' +
+            '</div>';
+        listGroup.insertBefore(item, listGroup.firstChild);
+
+        markedCount += 1;
+        justMarkedCount.textContent = markedCount;
+    }
+
+    function captureFrame() {
+        if (!isRunning || !stream || isProcessing) return;
+        if (video.readyState < 2 || video.videoWidth === 0) return;
+
+        isProcessing = true;
+
+        const context = canvas.getContext('2d');
+        const width = video.videoWidth || 640;
+        const height = video.videoHeight || 480;
+        canvas.width = width;
+        canvas.height = height;
+        context.drawImage(video, 0, 0, width, height);
+        const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
+        fetch('/courses/session/' + sessionId + '/mark', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageData })
+        })
+        .then(function(response) {
+            if (!response.ok) throw new Error('Server returned ' + response.status);
+            return response.json();
+        })
+        .then(function(data) {
+            isProcessing = false;
+
+            if (data.idle) {
+                return;
+            }
+
+            if (data.success && !data.already_marked) {
+                setStatus('success', '<i class="fas fa-check-circle me-2"></i>' + data.message);
+                addJustMarked(data.student_name, data.time || '');
+                lastAnnouncedKey = data.student_name;
+            } else if (data.success && data.already_marked) {
+                if (lastAnnouncedKey !== data.student_name) {
+                    setStatus('info', '<i class="fas fa-info-circle me-2"></i>' + data.message);
+                    lastAnnouncedKey = data.student_name;
+                }
+            } else {
+                setStatus('warning', '<i class="fas fa-exclamation-triangle me-2"></i>' + data.message);
+                lastAnnouncedKey = null;
+            }
+        })
+        .catch(function(error) {
+            isProcessing = false;
+            console.error('Scan error:', error);
+            setStatus('error', '<i class="fas fa-exclamation-circle me-2"></i>Error contacting server: ' + error.message);
+        });
+    }
+
+    startBtn.addEventListener('click', function() {
+        resultDiv.className = 'recognition-result';
+        resultDiv.innerHTML = '';
+        startBtn.disabled = true;
+        cameraLoading.style.display = 'block';
+        videoPlaceholder.style.display = 'none';
+
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
+        })
+        .then(function(mediaStream) {
+            stream = mediaStream;
+            video.srcObject = stream;
+
+            video.onloadedmetadata = function() {
+                video.play()
+                    .then(function() {
+                        video.style.display = 'block';
+                        cameraLoading.style.display = 'none';
+                        isRunning = true;
+                        stopBtn.disabled = false;
+                        startBtn.disabled = true;
+                        scanIndicator.classList.add('show');
+
+                        setStatus('info', '<i class="fas fa-info-circle me-2"></i>Scanning started. Have students look at the camera one at a time.');
+
+                        scanTimer = setInterval(captureFrame, SCAN_INTERVAL_MS);
+                    })
+                    .catch(function(err) {
+                        console.error('Error playing video:', err);
+                        setStatus('error', '<i class="fas fa-exclamation-circle me-2"></i>Error playing video stream. Please try again.');
+                        startBtn.disabled = false;
+                        cameraLoading.style.display = 'none';
+                        videoPlaceholder.style.display = 'block';
+                    });
+            };
+
+            video.onerror = function(err) {
+                console.error('Video error:', err);
+                setStatus('error', '<i class="fas fa-exclamation-circle me-2"></i>Video error occurred. Please refresh the page.');
+                startBtn.disabled = false;
+                cameraLoading.style.display = 'none';
+                videoPlaceholder.style.display = 'block';
+            };
+        })
+        .catch(function(error) {
+            console.error('Camera access error:', error);
+            cameraLoading.style.display = 'none';
+            videoPlaceholder.style.display = 'block';
+            startBtn.disabled = false;
+
+            let errorMsg = 'Camera error: ';
+            if (error.name === 'NotAllowedError') {
+                errorMsg += 'Please allow camera access in your browser settings.';
+            } else if (error.name === 'NotFoundError') {
+                errorMsg += 'No camera found on this device.';
+            } else if (error.name === 'NotReadableError') {
+                errorMsg += 'Camera is in use by another application or tab. Close it and try again.';
+            } else if (error.name === 'OverconstrainedError') {
+                errorMsg += 'Camera constraints cannot be met. Please try a different camera.';
+            } else {
+                errorMsg += error.message;
+            }
+
+            setStatus('error', '<i class="fas fa-exclamation-circle me-2"></i>' + errorMsg);
+        });
+    });
+
+    stopBtn.addEventListener('click', function() {
+        if (scanTimer) {
+            clearInterval(scanTimer);
+            scanTimer = null;
+        }
+        if (stream) {
+            stream.getTracks().forEach(function(track) { track.stop(); });
+            stream = null;
+            video.srcObject = null;
+            video.style.display = 'none';
+            videoPlaceholder.style.display = 'block';
+
+            isRunning = false;
+            stopBtn.disabled = true;
+            startBtn.disabled = false;
+            scanIndicator.classList.remove('show');
+
+            setStatus('info', '<i class="fas fa-info-circle me-2"></i>Camera stopped.');
+        }
+    });
+
+    window.addEventListener('beforeunload', function() {
+        if (scanTimer) clearInterval(scanTimer);
+        if (stream) {
+            stream.getTracks().forEach(function(track) { track.stop(); });
+        }
+    });
+    {% endif %}
+});
+</script>
+{% endblock %}

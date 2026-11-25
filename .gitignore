@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────
+# Environment / secrets
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ─────────────────────────────────────────────
+# Virtual environments
+# ─────────────────────────────────────────────
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# ─────────────────────────────────────────────
+# Flask / instance data
+# ─────────────────────────────────────────────
+instance/
+.webassets-cache
+*.db
+*.sqlite
+*.sqlite3
+faceattend.db
+
+# ─────────────────────────────────────────────
+# Uploaded / generated face images
+# (enrolled student photos should never be committed)
+# ─────────────────────────────────────────────
+uploads/
+uploads/faces/
+
+# ─────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─────────────────────────────────────────────
+# Testing / coverage
+# ─────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ─────────────────────────────────────────────
+# Editors / OS
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─────────────────────────────────────────────
+# dlib / model artifacts (large, downloaded on install)
+# ─────────────────────────────────────────────
+*.dat
+# keep the template
+!.env.example
+
+# Secrets and local configuration
+instance/
+.env.local
+.env.production
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+
+{% block title %}Session Details - {{ course.course_code if course else 'Course' }}{% endblock %}
+
+{% block extra_css %}
+<style>
+    :root {
+        --brand-1: #667eea;
+        --brand-2: #764ba2;
+    }
+
+    .session-hero {
+        background: linear-gradient(135deg, var(--brand-1) 0%, var(--brand-2) 100%);
+        border-radius: 18px;
+        padding: 2rem;
+        color: #fff;
+        position: relative;
+        overflow: hidden;
+        margin-bottom: 1.5rem;
+    }
+    .session-hero::before {
+        content: '';
+        position: absolute;
+        top: -60px;
+        right: -60px;
+        width: 220px;
+        height: 220px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.08);
+    }
+    .session-hero .course-code {
+        font-size: 0.85rem;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        opacity: 0.85;
+    }
+    .session-hero h1 {
+        font-size: 1.7rem;
+        font-weight: 700;
+        margin: 0.15rem 0 0.75rem;
+    }
+    .session-hero .meta-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(255,255,255,0.15);
+        border-radius: 50px;
+        padding: 0.3rem 0.9rem;
+        font-size: 0.82rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.3rem;
+    }
+    .session-hero .meta-pill.status-active {
+        background: rgba(72, 219, 137, 0.25);
+    }
+    .session-hero .meta-pill.status-closed {
+        background: rgba(255,255,255,0.15);
+    }
+    .session-hero .hero-actions {
+        position: relative;
+        z-index: 1;
+        margin-top: 1.25rem;
+    }
+    .session-hero .btn-hero-primary {
+        background: #fff;
+        color: var(--brand-2);
+        font-weight: 600;
+        border: none;
+    }
+    .session-hero .btn-hero-primary:hover {
+        background: #f1f1ff;
+        color: var(--brand-2);
+    }
+    .session-hero .btn-hero-danger {
+        background: rgba(220, 53, 69, 0.85);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.4);
+    }
+    .session-hero .btn-hero-danger:hover {
+        background: #dc3545;
+        color: #fff;
+    }
+    .session-hero .btn-hero-outline {
+        background: transparent;
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.6);
+    }
+    .session-hero .btn-hero-outline:hover {
+        background: rgba(255,255,255,0.15);
+        color: #fff;
+    }
+
+    .progress-ring-card {
+        border-radius: 16px;
+        border: 1px solid #eaecf4;
+        padding: 1.5rem;
+        text-align: center;
+        height: 100%;
+    }
+    .progress-ring-wrap {
+        position: relative;
+        width: 150px;
+        height: 150px;
+        margin: 0 auto 0.75rem;
+    }
+    .progress-ring-wrap svg {
+        transform: rotate(-90deg);
+        width: 150px;
+        height: 150px;
+    }
+    .progress-ring-bg {
+        fill: none;
+        stroke: #f0f1f8;
+        stroke-width: 12;
+    }
+    .progress-ring-fill {
+        fill: none;
+        stroke: url(#ringGradient);
+        stroke-width: 12;
+        stroke-linecap: round;
+        transition: stroke-dashoffset 0.8s ease;
+    }
+    .progress-ring-label {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+    }
+    .progress-ring-label .pct {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #2e2e3a;
+        display: block;
+        line-height: 1;
+    }
+    .progress-ring-label .sub {
+        font-size: 0.72rem;
+        color: #858796;
+    }
+
+    .mini-stat-row {
+        display: flex;
+        justify-content: center;
+        gap: 1.5rem;
+        margin-top: 0.5rem;
+    }
+    .mini-stat-row .mini-stat .num {
+        font-weight: 700;
+        font-size: 1.1rem;
+    }
+    .mini-stat-row .mini-stat .label {
+        font-size: 0.72rem;
+        color: #858796;
+    }
+
+    .roster-card {
+        border-radius: 16px;
+        border: 1px solid #eaecf4;
+        height: 100%;
+    }
+    .roster-card .card-header {
+        background: #fff;
+        border-bottom: 1px solid #f1f1f5;
+        border-radius: 16px 16px 0 0 !important;
+    }
+    .roster-search {
+        border-radius: 50px;
+        border: 1px solid #eaecf4;
+        padding: 0.4rem 1rem;
+        font-size: 0.85rem;
+    }
+    .roster-scroll {
+        max-height: 360px;
+        overflow-y: auto;
+    }
+    .roster-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.65rem 0;
+        border-bottom: 1px solid #f5f5f9;
+    }
+    .roster-row:last-child {
+        border-bottom: none;
+    }
+    .roster-row.hidden-by-search {
+        display: none;
+    }
+    .avatar-circle {
+        width: 38px;
+        height: 38px;
+        min-width: 38px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.85rem;
+        color: #fff;
+    }
+    .avatar-circle.present {
+        background: linear-gradient(135deg, #28a745, #20c997);
+    }
+    .avatar-circle.pending {
+        background: linear-gradient(135deg, #f6ad55, #ed8936);
+    }
+    .roster-row .name {
+        font-weight: 600;
+        font-size: 0.92rem;
+        color: #2e2e3a;
+    }
+    .roster-row .sub {
+        font-size: 0.75rem;
+        color: #858796;
+    }
+    .empty-roster {
+        text-align: center;
+        padding: 2rem 1rem;
+        color: #858796;
+    }
+    .empty-roster i {
+        font-size: 2rem;
+        color: #dfe1ee;
+        display: block;
+        margin-bottom: 0.5rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    {% if not course or not attendance_session %}
+        <div class="alert alert-danger">
+            <i class="fas fa-exclamation-circle me-2"></i>
+            This session could not be loaded.
+            <a href="{{ url_for('courses.list_courses') }}" class="alert-link">Back to courses</a>
+        </div>
+    {% else %}
+
+    {% set rate = (present_count / total_enrolled * 100) if total_enrolled > 0 else 0 %}
+    {% set circumference = 2 * 3.14159265 * 54 %}
+    {% set offset = circumference - (rate / 100 * circumference) %}
+
+    <!-- Hero -->
+    <div class="session-hero">
+        <div class="course-code">{{ course.course_code }}</div>
+        <h1>{{ course.course_name }}</h1>
+        <div>
+            <span class="meta-pill">
+                <i class="fas fa-calendar-alt"></i>
+                {{ attendance_session.session_date.strftime('%B %d, %Y') if attendance_session.session_date else 'N/A' }}
+            </span>
+            <span class="meta-pill">
+                <i class="fas fa-clock"></i>
+                {{ attendance_session.session_time.strftime('%I:%M %p') if attendance_session.session_time else 'N/A' }}
+            </span>
+            {% if attendance_session.topic %}
+            <span class="meta-pill">
+                <i class="fas fa-book-open"></i> {{ attendance_session.topic }}
+            </span>
+            {% endif %}
+            <span class="meta-pill {{ 'status-active' if attendance_session.status == 'active' else 'status-closed' }}">
+                <i class="fas fa-circle" style="font-size: 0.55rem;"></i>
+                {{ 'Active Session' if attendance_session.status == 'active' else 'Closed' }}
+            </span>
+        </div>
+
+        {% if user and user.role in ('teacher', 'admin') %}
+        <div class="hero-actions">
+            {% if attendance_session.status == 'active' %}
+                <a href="{{ url_for('legacy.mark_attendance') }}?course={{ course.id }}" class="btn btn-hero-primary btn-sm px-3">
+                    <i class="fas fa-camera me-1"></i> Mark Attendance
+                </a>
+                <form method="POST" action="{{ url_for('courses.end_attendance_session', session_id=attendance_session.id) }}"
+                      class="d-inline" onsubmit="return confirm('End this attendance session? Students will no longer be able to be marked present.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-hero-danger btn-sm px-3">
+                        <i class="fas fa-stop-circle me-1"></i> End Session
+                    </button>
+                </form>
+            {% else %}
+                <a href="{{ url_for('courses.attendance_report') }}?course={{ course.id }}" class="btn btn-hero-outline btn-sm px-3">
+                    <i class="fas fa-chart-bar me-1"></i> View Attendance Report
+                </a>
+            {% endif %}
+            <a href="{{ url_for('courses.view_course', course_id=course.id) }}" class="btn btn-hero-outline btn-sm px-3">
+                <i class="fas fa-arrow-left me-1"></i> Back to Course
+            </a>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="row g-3">
+        <!-- Progress ring -->
+        <div class="col-lg-4">
+            <div class="progress-ring-card bg-white">
+                <div class="progress-ring-wrap">
+                    <svg viewBox="0 0 120 120">
+                        <defs>
+                            <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#667eea"/>
+                                <stop offset="100%" stop-color="#28a745"/>
+                            </linearGradient>
+                        </defs>
+                        <circle class="progress-ring-bg" cx="60" cy="60" r="54"></circle>
+                        <circle class="progress-ring-fill" cx="60" cy="60" r="54"
+                                stroke-dasharray="{{ circumference }}"
+                                stroke-dashoffset="{{ offset }}"></circle>
+                    </svg>
+                    <div class="progress-ring-label">
+                        <span class="pct">{{ rate | round(0, 'floor') | int }}%</span>
+                        <span class="sub">attendance</span>
+                    </div>
+                </div>
+                <div class="mini-stat-row">
+                    <div class="mini-stat">
+                        <div class="num text-primary">{{ total_enrolled }}</div>
+                        <div class="label">Enrolled</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="num text-success">{{ present_count }}</div>
+                        <div class="label">Present</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="num text-warning">{{ absent_count }}</div>
+                        <div class="label">Pending</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Present roster -->
+        <div class="col-lg-4">
+            <div class="roster-card card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <h6 class="mb-0"><i class="fas fa-check-circle text-success me-2"></i>Present</h6>
+                    <input type="text" class="form-control form-control-sm roster-search" style="max-width: 140px;"
+                           placeholder="Search..." data-target="presentRoster">
+                </div>
+                <div class="card-body roster-scroll" id="presentRoster">
+                    {% if records %}
+                        {% for record in records %}
+                            {% set student_user = record_users.get(record.student_id) %}
+                            <div class="roster-row" data-name="{{ (student_user.fullname if student_user else 'unknown student')|lower }}">
+                                <div class="avatar-circle present">
+                                    {{ (student_user.fullname[0] if student_user and student_user.fullname else '?') | upper }}
+                                </div>
+                                <div class="flex-grow-1">
+                                    <div class="name">{{ student_user.fullname if student_user else 'Unknown student' }}</div>
+                                    <div class="sub">
+                                        {{ (record.marked_at|localtime).strftime('%I:%M %p') if record.marked_at else '' }}
+                                        {% if record.face_confidence is not none %}
+                                            &middot; {{ '%.0f'|format(record.face_confidence) }}% match
+                                        {% elif record.remarks %}
+                                            &middot; <span class="badge bg-secondary">manual</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                {% if user and user.role in ('teacher', 'admin') %}
+                                <form method="POST"
+                                      action="{{ url_for('courses.manual_unmark_attendance', session_id=attendance_session.id) }}"
+                                      onsubmit="return confirm('Remove this attendance record?');">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <input type="hidden" name="student_user_id" value="{{ record.student_id }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove this record">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                </form>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="empty-roster">
+                            <i class="fas fa-user-clock"></i>
+                            No one has been marked present yet.
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Pending roster -->
+        <div class="col-lg-4">
+            <div class="roster-card card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <h6 class="mb-0"><i class="fas fa-hourglass-half text-warning me-2"></i>Not Yet Marked</h6>
+                    <input type="text" class="form-control form-control-sm roster-search" style="max-width: 140px;"
+                           placeholder="Search..." data-target="pendingRoster">
+                </div>
+                <div class="card-body roster-scroll" id="pendingRoster">
+                    {% set pending_students = enrolled_users|rejectattr('id', 'in', attended_ids)|list %}
+                    {% if pending_students %}
+                        {% for student_user in pending_students %}
+                            <div class="roster-row" data-name="{{ student_user.fullname|lower }}">
+                                <div class="avatar-circle pending">
+                                    {{ student_user.fullname[0] | upper if student_user.fullname else '?' }}
+                                </div>
+                                <div class="flex-grow-1">
+                                    <div class="name">{{ student_user.fullname }}</div>
+                                </div>
+                                {% if user and user.role in ('teacher', 'admin') %}
+                                <form method="POST" class="d-flex gap-1"
+                                      action="{{ url_for('courses.manual_mark_attendance', session_id=attendance_session.id) }}"
+                                      onsubmit='return confirm({{ ("Mark " ~ student_user.fullname ~ " present manually?")|tojson }});'>
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <input type="hidden" name="student_user_id" value="{{ student_user.id }}">
+                                    <input type="text" name="reason" maxlength="100"
+                                           class="form-control form-control-sm" style="width: 8.5rem;"
+                                           placeholder="Reason (optional)">
+                                    <button type="submit" class="btn btn-sm btn-outline-success" title="Mark present manually">
+                                        <i class="fas fa-check"></i>
+                                    </button>
+                                </form>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="empty-roster">
+                            <i class="fas fa-champagne-glasses"></i>
+                            {% if total_enrolled == 0 %}
+                                No students enrolled yet.
+                            {% else %}
+                                Everyone has been marked present!
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.roster-search').forEach(function(input) {
+        input.addEventListener('input', function() {
+            const targetId = this.dataset.target;
+            const container = document.getElementById(targetId);
+            if (!container) return;
+
+            const query = this.value.trim().toLowerCase();
+            container.querySelectorAll('.roster-row').forEach(function(row) {
+                const name = row.dataset.name || '';
+                row.classList.toggle('hidden-by-search', query.length > 0 && !name.includes(query));
+            });
+        });
+    });
+});
+</script>
+{% endblock %}

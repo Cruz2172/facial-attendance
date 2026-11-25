@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block title %}Attendance Report - FaceAttend{% endblock %}
+
+{% block extra_css %}
+<style>
+    .report-header {
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: white;
+        padding: 25px 30px;
+        border-radius: 15px;
+        margin-bottom: 25px;
+    }
+    .report-header h2 {
+        font-weight: 700;
+        margin-bottom: 5px;
+    }
+    .course-report-card {
+        margin-bottom: 25px;
+    }
+    .course-report-card .card-header {
+        background: #f8f9fa;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .attendance-table th {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        color: #6c757d;
+        border-top: none;
+    }
+    .attendance-table td {
+        vertical-align: middle;
+    }
+    .badge-pct {
+        font-size: 0.85rem;
+        padding: 6px 12px;
+        min-width: 90px;
+        display: inline-block;
+        text-align: center;
+    }
+    .legend {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: center;
+        font-size: 0.85rem;
+        color: #6c757d;
+    }
+    .legend .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 5px;
+    }
+    .filter-bar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+
+    <div class="report-header">
+        <h2><i class="fas fa-chart-bar me-2"></i>Attendance Report</h2>
+        <p class="mb-0">
+            {% if current_user_role == 'admin' %}
+                Attendance rate for every student, across all courses.
+            {% else %}
+                Attendance rate for every student enrolled in your courses.
+            {% endif %}
+        </p>
+    </div>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ 'danger' if category == 'error' else 'success' if category == 'success' else 'warning' }} alert-dismissible fade show">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <!-- Filter + Legend -->
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-3">
+        <form method="GET" class="filter-bar">
+            <label for="course" class="mb-0 me-1"><i class="fas fa-filter me-1"></i>Course:</label>
+            <select name="course" id="course" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
+                <option value="">All Courses</option>
+                {% for c in all_courses %}
+                    <option value="{{ c.id }}" {% if selected_course_id == c.id %}selected{% endif %}>
+                        {{ c.course_code }} - {{ c.course_name }}
+                    </option>
+                {% endfor %}
+            </select>
+            {% if selected_course_id %}
+                <a href="{{ url_for('courses.attendance_report') }}" class="btn btn-sm btn-outline-secondary">
+                    <i class="fas fa-times"></i> Clear
+                </a>
+            {% endif %}
+        </form>
+
+        <div class="legend">
+            <span><span class="dot bg-danger"></span>&lt; 50%</span>
+            <span><span class="dot bg-warning"></span>50% - 74.99%</span>
+            <span><span class="dot bg-success"></span>&gt;= 75%</span>
+        </div>
+    </div>
+
+    {% if report %}
+        {% for entry in report %}
+        <div class="card course-report-card">
+            <div class="card-header">
+                <div>
+                    <h5 class="mb-0">
+                        {{ entry.course.course_code }} - {{ entry.course.course_name }}
+                    </h5>
+                    <small class="text-muted">
+                        <i class="fas fa-chalkboard-teacher me-1"></i>{{ entry.course.get_teacher_name() }}
+                        <span class="ms-3"><i class="fas fa-calendar-check me-1"></i>{{ entry.total_sessions }} session(s) held</span>
+                        <span class="ms-3"><i class="fas fa-users me-1"></i>{{ entry.students|length }} student(s)</span>
+                    </small>
+                </div>
+                <div class="d-flex gap-2">
+                    <a href="{{ url_for('courses.print_attendance_report', course_id=entry.course.id) }}" class="btn btn-sm btn-outline-secondary" target="_blank">
+                        <i class="fas fa-print me-1"></i>Print / Export
+                    </a>
+                    <a href="{{ url_for('courses.view_course', course_id=entry.course.id) }}" class="btn btn-sm btn-outline-primary">
+                        <i class="fas fa-eye me-1"></i>View Course
+                    </a>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                {% if entry.students %}
+                <div class="table-responsive">
+                    <table class="table attendance-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Student ID</th>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Sessions Attended</th>
+                                <th>Attendance Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for s in entry.students %}
+                            <tr>
+                                <td>{{ s.student_id }}</td>
+                                <td>{{ s.fullname }}</td>
+                                <td class="text-muted">{{ s.email }}</td>
+                                <td>{{ s.attended }} / {{ s.total }}</td>
+                                <td>
+                                    {% if s.total > 0 %}
+                                        <span class="badge bg-{{ attendance_badge_class(s.percentage) }} badge-pct">
+                                            {{ s.percentage }}%
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-secondary badge-pct">No sessions yet</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted text-center my-4">
+                    No face-enrolled students in this course yet.
+                </p>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="alert alert-info">
+            <i class="fas fa-info-circle me-2"></i>
+            {% if current_user_role == 'admin' %}
+                No courses found yet.
+            {% else %}
+                You haven't created any courses yet.
+                <a href="{{ url_for('courses.create_course') }}" class="alert-link">Create one</a> to start tracking attendance.
+            {% endif %}
+        </div>
+    {% endif %}
+
+</div>
+{% endblock %}
