@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app import create_app          # noqa: E402
-from app.bootstrap import init_database   # noqa: E402
+from app import create_app        
+from app.bootstrap import init_database  
 
 app = create_app()
 
