@@ -1,4 +1,4 @@
-from flask import session, g
+from flask import session, g, current_app
 
 from .extensions import db
 from .models import User, Course, CourseEnrollmentRequest
@@ -6,6 +6,14 @@ from .timeutil import now_local
 
 
 def register_context_processors(app):
+
+    @app.context_processor
+    def inject_enroll_config():
+        """How many guided photos the enrollment pages ask for."""
+        return dict(
+            enroll_capture_count=current_app.config.get('ENROLL_CAPTURE_COUNT', 5),
+            enroll_min_images=current_app.config.get('ENROLL_MIN_IMAGES', 3),
+        )
 
     @app.context_processor
     def inject_pending_count():

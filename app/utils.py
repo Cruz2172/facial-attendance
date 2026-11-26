@@ -1,9 +1,8 @@
-
 from flask import current_app
 
 from .extensions import db
 from .face_core import (
-    FaceInputError, decode_data_url, find_duplicate,
+    FaceInputError, decode_data_url, find_duplicate_person,
 )
 from .face_cache import (          # re-exported: other modules import these from utils
     get_known_faces, get_course_roster, get_roster_ids, get_state,
@@ -112,7 +111,7 @@ def check_face_duplicate(face_encoding, threshold=None, margin=None):
         margin = current_app.config['MATCH_MARGIN']
     try:
         state = get_state()
-        idx = find_duplicate(state.matrix, face_encoding, threshold, margin)
+        idx = find_duplicate_person(state.matrix, state.starts, face_encoding, threshold, margin)
         return state.records[idx] if idx is not None else None
     except Exception:
         current_app.logger.exception('Error checking duplicate face')

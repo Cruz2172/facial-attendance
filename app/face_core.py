@@ -191,18 +191,76 @@ def get_gate(limit):
 
 # ---------------------------------------------------------------------------
 # Encodings stored in the database
+#
+# A student's face data is a JSON text column holding either
+#   * LEGACY: one encoding  -> [0.1, ..., 0.2]            (128 numbers)
+#   * CURRENT: 3-7 encodings -> [[...128...], [...128...]] (one per captured photo)
+# Both formats are read transparently, so students enrolled before multi-image
+# enrollment keep working with no data migration.
 # ---------------------------------------------------------------------------
-def parse_encoding(raw):
-    """JSON string -> float64 ndarray of length 128, or None if unusable."""
+MAX_TEMPLATES_PER_PERSON = 10
+
+
+def parse_encodings(raw):
+    """JSON text -> float64 array of shape (k, 128), or None if nothing usable.
+
+    Rows are validated one by one: a corrupt row (wrong length, NaN/inf, not a
+    list of numbers) is skipped and the good rows are kept, so a single bad
+    template can never wipe out a student's whole face record. At most
+    MAX_TEMPLATES_PER_PERSON rows are kept."""
     if not raw:
         return None
     try:
-        arr = np.asarray(json.loads(raw), dtype=np.float64)
+        data = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    if arr.shape != (ENCODING_LEN,) or not np.all(np.isfinite(arr)):
+    if not isinstance(data, list) or not data:
         return None
-    return arr
+
+    is_number = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+    rows = [data] if all(is_number(x) for x in data) else data      # legacy flat list = one template
+
+    good = []
+    for row in rows:
+        try:
+            vec = np.asarray(row, dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        if vec.shape == (ENCODING_LEN,) and np.all(np.isfinite(vec)):
+            good.append(vec)
+            if len(good) >= MAX_TEMPLATES_PER_PERSON:
+                break
+    return np.vstack(good) if good else None
+
+
+def parse_encoding(raw):
+    """First template only (kept for backwards compatibility)."""
+    arr = parse_encodings(raw)
+    return arr[0] if arr is not None else None
+
+
+def serialize_encodings(encodings):
+    """List/array of 128-d encodings -> JSON text for the database."""
+    return json.dumps([np.asarray(e, dtype=np.float64).tolist() for e in encodings])
+
+
+def check_capture_consistency(encodings, max_distance):
+    """Make sure every enrollment photo shows the SAME person.
+
+    Returns ``(ok, bad_index, worst_distance)``. ``bad_index`` is the photo that
+    disagrees most with the others (when not ok). Same-person photos with
+    different head poses/expressions are normally 0.2-0.45 apart; a different
+    person is typically > 0.6.
+    """
+    arr = np.asarray(encodings, dtype=np.float64)
+    if len(arr) < 2:
+        return True, None, 0.0
+    diff = arr[:, None, :] - arr[None, :, :]
+    dist = np.linalg.norm(diff, axis=2)
+    worst = float(dist.max())
+    if worst <= max_distance:
+        return True, None, worst
+    return False, int(np.argmax(dist.max(axis=1))), worst
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +281,28 @@ def _two_smallest(distances):
     return int(first), float(distances[first]), float(distances[second])
 
 
-def identify(matrix, encoding, threshold, margin):
-    """1:N identification.
+def person_distances(matrix, starts, encoding):
+    """Distance from ``encoding`` to each PERSON (the closest of that person's
+    templates).
 
-    Returns ``(index, best_distance, status)``; status is
-    'ok' | 'unknown' (closest face too far) | 'ambiguous' (runner-up too close)
+    ``matrix`` stacks every template of every person; ``starts[i]`` is the row
+    where person i's templates begin (strictly increasing, each person has at
+    least one row). Aggregating per person matters: a person's own templates
+    must never count as "runner-up" candidates against each other.
     """
-    distances = face_distances(matrix, encoding)
+    if matrix is None or len(matrix) == 0 or starts is None or len(starts) == 0:
+        return np.empty(0)
+    row_distances = np.linalg.norm(matrix - encoding, axis=1)
+    return np.minimum.reduceat(row_distances, np.asarray(starts, dtype=np.intp))
+
+
+def identify_people(matrix, starts, encoding, threshold, margin):
+    """1:N identification over multi-template people.
+
+    Returns ``(person_index, best_distance, status)``; status is
+    'ok' | 'unknown' (closest person too far) | 'ambiguous' (runner-up person too close)
+    """
+    distances = person_distances(matrix, starts, encoding)
     if len(distances) == 0:
         return None, None, 'unknown'
 
@@ -241,10 +314,10 @@ def identify(matrix, encoding, threshold, margin):
     return best_idx, best, 'ok'
 
 
-def find_duplicate(matrix, encoding, threshold, margin):
-    """Index of an already-enrolled face that is unambiguously the same
-    person, else None (same rules as the original duplicate check)."""
-    distances = face_distances(matrix, encoding)
+def find_duplicate_person(matrix, starts, encoding, threshold, margin):
+    """Index of an already-enrolled PERSON this encoding unambiguously matches,
+    else None (same rules as the original duplicate check)."""
+    distances = person_distances(matrix, starts, encoding)
     if len(distances) == 0:
         return None
     best_idx, best, second = _two_smallest(distances)
@@ -253,3 +326,17 @@ def find_duplicate(matrix, encoding, threshold, margin):
     if second is not None and (second - best) < margin:
         return None
     return best_idx
+
+
+def identify(matrix, encoding, threshold, margin):
+    """Single-template-per-person form (kept for compatibility and tests)."""
+    if matrix is None or len(matrix) == 0:
+        return None, None, 'unknown'
+    return identify_people(matrix, np.arange(len(matrix)), encoding, threshold, margin)
+
+
+def find_duplicate(matrix, encoding, threshold, margin):
+    """Single-template-per-person form (kept for compatibility and tests)."""
+    if matrix is None or len(matrix) == 0:
+        return None
+    return find_duplicate_person(matrix, np.arange(len(matrix)), encoding, threshold, margin)

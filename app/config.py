@@ -39,6 +39,13 @@ def _normalise_db_url(url):
     return url
 
 
+# Multi-image enrollment: the capture page guides the student through
+# ENROLL_CAPTURE_COUNT poses; the server needs at least ENROLL_MIN_IMAGES good
+# photos and accepts at most ENROLL_MAX_IMAGES (7 = number of guided poses).
+_ENROLL_MIN = max(1, _env_int('ENROLL_MIN_IMAGES', 3))
+_ENROLL_MAX = max(_ENROLL_MIN, min(7, _env_int('ENROLL_MAX_IMAGES', 7)))
+_ENROLL_COUNT = min(max(_env_int('ENROLL_CAPTURE_COUNT', 5), _ENROLL_MIN), _ENROLL_MAX)
+
 APP_ENV = (os.environ.get('APP_ENV') or os.environ.get('FLASK_ENV') or 'production').strip().lower()
 IS_PRODUCTION = APP_ENV == 'production'
 
@@ -132,7 +139,13 @@ class Config:
     FACE_MIN_SIZE_PX = _env_int('FACE_MIN_SIZE_PX', 60)            # on the downscaled image
     FACE_PRIMARY_RATIO = _env_float('FACE_PRIMARY_RATIO', 1.6)     # biggest face must be this much bigger
     FACE_SCAN_JITTERS = _env_int('FACE_SCAN_JITTERS', 1)
-    FACE_ENROLL_JITTERS = _env_int('FACE_ENROLL_JITTERS', 3)
+    FACE_ENROLL_JITTERS = _env_int('FACE_ENROLL_JITTERS', 2)       # per photo; several photos are taken
+    ENROLL_CAPTURE_COUNT = _ENROLL_COUNT
+    ENROLL_MIN_IMAGES = _ENROLL_MIN
+    ENROLL_MAX_IMAGES = _ENROLL_MAX
+    # All enrollment photos must show the same person: reject if any two are
+    # further apart than this (same person, different pose ~0.2-0.45; different person > 0.6).
+    ENROLL_CONSISTENCY_MAX = _env_float('ENROLL_CONSISTENCY_MAX', 0.55)
     # Max simultaneous dlib jobs per worker; the rest wait, then get a
     # "server busy, retrying" response instead of exhausting CPU/RAM.
     FACE_MAX_CONCURRENT = _env_int('FACE_MAX_CONCURRENT', 2)

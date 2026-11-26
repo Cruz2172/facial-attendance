@@ -41,7 +41,7 @@ def _create_indexes(log):
             db.session.commit()
         except Exception as exc:
             db.session.rollback()
-            log(f"  ! Could not create index '{label}': {exc}")
+            log(f"  ! Could not create index'{label}': {exc}")
             if 'active session' in label:
                 log("    (If this says duplicate key: a course has two ACTIVE sessions. "
                     "End the extra one, then re-run init-db.)")

@@ -1,4 +1,3 @@
-import json
 import re
 from datetime import datetime, timedelta
 
@@ -16,9 +15,10 @@ from ..models import (
     AttendanceSession, CourseAttendanceRecord, InviteCode, CourseEnrollmentToken
 )
 from ..utils import invalidate_face_cache, invalidate_course_roster_cache
+from ..face_core import serialize_encodings
 from ..services.enrollment import (
     EnrollmentError, validate_enrollment_form, check_not_already_enrolled,
-    decode_and_normalize_image, detect_single_face, reject_if_duplicate,
+    parse_face_images, encode_enrollment_images, reject_if_duplicate,
     save_face_image
 )
 
@@ -476,20 +476,21 @@ def enroll():
     email = request.form.get('email', '').strip().lower()
     course = request.form.get('course', '').strip()
     level = request.form.get('level', '').strip()
-    face_data = request.form.get('face_data', '')
     invite_code = request.form.get('invite_code', '').strip()
     consent = request.form.get('consent') in ('on', 'true', '1', 'yes')
 
     try:
-        validate_enrollment_form(student_id, fullname, email, course, level, face_data, consent)
+        face_images = parse_face_images(request.form)
+        validate_enrollment_form(student_id, fullname, email, course, level, face_images, consent)
         incomplete = check_not_already_enrolled(session['user_id'], student_id, email)
 
-        img_bgr, img_rgb = decode_and_normalize_image(face_data)
-        face_encoding_array = detect_single_face(img_rgb)
-        reject_if_duplicate(face_encoding_array, user_id=session['user_id'])
+        # One template per photo (different head positions / expressions).
+        # Each photo must contain exactly one face and all must be the same person.
+        encodings, first_photo_bgr = encode_enrollment_images(face_images)
+        reject_if_duplicate(encodings, user_id=session['user_id'])
 
-        face_encoding = json.dumps(face_encoding_array.tolist())
-        face_path = save_face_image(img_bgr, student_id)
+        face_encoding = serialize_encodings(encodings)
+        face_path = save_face_image(first_photo_bgr, student_id)    # only if STORE_FACE_IMAGES=true
 
         if incomplete is not None:
             # Finish the half-created profile instead of failing forever.
@@ -516,7 +517,8 @@ def enroll():
             )
             db.session.add(new_student)
 
-        audit('student.face_enroll', 'student', student_id, f'user_id={session["user_id"]}')
+        audit('student.face_enroll', 'student', student_id,
+              f'user_id={session["user_id"]} templates={len(encodings)}')
         db.session.commit()
         invalidate_face_cache()
 

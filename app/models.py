@@ -56,12 +56,19 @@ class Student(db.Model):
         db.Index('idx_student_user_id', 'user_id'),
     )
 
+    def get_encodings(self):
+        """All stored face templates as an array of shape (k, 128), or None.
+        Reads both the legacy single-encoding and the multi-image format."""
+        from .face_core import parse_encodings
+        return parse_encodings(self.face_encoding)
+
     def get_encoding(self):
-        try:
-            return np.array(json.loads(self.face_encoding))
-        except Exception as e:
-            current_app.logger.error(f"Error loading encoding for student {self.id}: {str(e)}")
+        """First face template as a 1-D array (kept for backwards compatibility)."""
+        templates = self.get_encodings()
+        if templates is None:
+            current_app.logger.error(f"No usable face encoding for student {self.id}")
             return np.array([])
+        return templates[0]
 
     def to_dict(self):
         return {
@@ -394,4 +401,3 @@ class AuditLog(db.Model):
     target_type = db.Column(db.String(40))
     target_id = db.Column(db.String(60))
     details = db.Column(db.Text)
-

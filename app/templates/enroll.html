@@ -81,7 +81,8 @@
                     {% endif %}
                 {% endwith %}
 
-                <form method="POST" action="{{ url_for('student.enroll') }}" id="enrollForm">
+                <form method="POST" action="{{ url_for('student.enroll') }}" id="enrollForm"
+                      data-capture-count="{{ enroll_capture_count }}" data-min-images="{{ enroll_min_images }}">
                     <!-- CSRF Token - Important! -->
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token else '' }}">
                     <!-- Not launched from a dashboard modal -- on success or
@@ -139,7 +140,11 @@
                     
                     <div class="mb-3">
                         <label class="form-label fw-bold">Face Capture <span class="text-danger">*</span></label>
-                        <p class="text-muted small">Position your face clearly in the camera and click "Capture Face"</p>
+                        <p class="text-muted small">
+                            We take <strong>{{ enroll_capture_count }} photos</strong> with slightly different head positions and
+                            expressions. This helps the system recognise you in different lighting and angles.
+                            Sit in good light, with only your face in view, and follow the instructions on screen.
+                        </p>
                         
                         <div class="video-container" id="videoContainer">
                             <video id="enrollVideo" style="width: 100%; display: none;" autoplay playsinline></video>
@@ -156,7 +161,8 @@
                             </div>
                         </div>
                         <canvas id="canvas" style="display: none;"></canvas>
-                        <input type="hidden" id="face_data" name="face_data">
+                        <input type="hidden" id="face_images" name="face_images">
+                        <div id="captureSteps" class="mt-3"></div>
                         
                         <div class="mt-3 d-flex gap-2 flex-wrap justify-content-center">
                             <button type="button" id="startCameraBtn" class="btn btn-primary">
@@ -194,315 +200,5 @@
     </div>
 </div>
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('Enroll page loaded');
-    
-    // Get all elements
-    const video = document.getElementById('enrollVideo');
-    const canvas = document.getElementById('canvas');
-    const startBtn = document.getElementById('startCameraBtn');
-    const captureBtn = document.getElementById('captureBtn');
-    const stopBtn = document.getElementById('stopCameraBtn');
-    const resetBtn = document.getElementById('resetBtn');
-    const submitBtn = document.getElementById('submitBtn');
-    const faceDataInput = document.getElementById('face_data');
-    const videoPlaceholder = document.getElementById('videoPlaceholder');
-    const cameraLoading = document.getElementById('cameraLoading');
-    const captureStatus = document.getElementById('captureStatus');
-    const form = document.getElementById('enrollForm');
-    
-    let stream = null;
-    let isRunning = false;
-    let isCaptured = false;
-    
-    console.log('Elements found:', {
-        video: !!video,
-        canvas: !!canvas,
-        startBtn: !!startBtn,
-        captureBtn: !!captureBtn,
-        stopBtn: !!stopBtn,
-        resetBtn: !!resetBtn,
-        submitBtn: !!submitBtn,
-        faceDataInput: !!faceDataInput,
-        form: !!form
-    });
-    
-    // ─────────────────────────────────────────────
-    // Start Camera
-    // ─────────────────────────────────────────────
-    startBtn.addEventListener('click', function() {
-        console.log('Start camera button clicked');
-        startBtn.disabled = true;
-        cameraLoading.style.display = 'flex';
-        captureStatus.innerHTML = '<div class="alert alert-info">Requesting camera access...</div>';
-        
-        // Check if getUserMedia is supported
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            cameraLoading.style.display = 'none';
-            startBtn.disabled = false;
-            captureStatus.innerHTML = '<div class="alert alert-danger">Camera not supported in this browser.</div>';
-            return;
-        }
-        
-        navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: 'user',
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-            },
-            audio: false
-        })
-        .then(function(mediaStream) {
-            console.log('Camera access granted');
-            stream = mediaStream;
-            video.srcObject = stream;
-            video.style.display = 'block';
-            videoPlaceholder.style.display = 'none';
-            cameraLoading.style.display = 'none';
-            
-            // Wait for video to be ready
-            video.onloadedmetadata = function() {
-                video.play()
-                    .then(function() {
-                        console.log('Video playing');
-                        isRunning = true;
-                        captureBtn.disabled = false;
-                        stopBtn.disabled = false;
-                        startBtn.disabled = true;
-                        resetBtn.disabled = true;
-                        captureStatus.innerHTML = '<div class="alert alert-success">✅ Camera ready! Click "Capture Face" to take a photo.</div>';
-                    })
-                    .catch(function(err) {
-                        console.error('Video play error:', err);
-                        captureStatus.innerHTML = '<div class="alert alert-danger">Error playing video: ' + err.message + '</div>';
-                        startBtn.disabled = false;
-                    });
-            };
-            
-            video.onerror = function(err) {
-                console.error('Video error:', err);
-                captureStatus.innerHTML = '<div class="alert alert-danger">Video error occurred.</div>';
-                startBtn.disabled = false;
-            };
-        })
-        .catch(function(error) {
-            console.error('Camera error:', error);
-            cameraLoading.style.display = 'none';
-            startBtn.disabled = false;
-            
-            let errorMsg = 'Camera error: ';
-            if (error.name === 'NotAllowedError') {
-                errorMsg += 'Please allow camera access in your browser settings.';
-            } else if (error.name === 'NotFoundError') {
-                errorMsg += 'No camera found on this device.';
-            } else if (error.name === 'NotReadableError') {
-                errorMsg += 'Camera is in use by another application.';
-            } else if (error.name === 'OverconstrainedError') {
-                errorMsg += 'Camera constraints could not be satisfied.';
-            } else {
-                errorMsg += error.message;
-            }
-            
-            captureStatus.innerHTML = '<div class="alert alert-danger">❌ ' + errorMsg + '</div>';
-        });
-    });
-    
-    // ─────────────────────────────────────────────
-    // Capture Face
-    // ─────────────────────────────────────────────
-    captureBtn.addEventListener('click', function() {
-        console.log('Capture button clicked');
-        
-        if (!isRunning || !stream) {
-            console.log('Camera not running');
-            captureStatus.innerHTML = '<div class="alert alert-warning">Camera is not running. Please start camera first.</div>';
-            return;
-        }
-        
-        // Check if video is ready
-        if (video.readyState < 2) {
-            console.log('Video not ready, readyState:', video.readyState);
-            captureStatus.innerHTML = '<div class="alert alert-warning">Camera is not ready. Please wait.</div>';
-            return;
-        }
-        
-        if (video.videoWidth === 0 || video.videoHeight === 0) {
-            console.log('Video has no dimensions');
-            captureStatus.innerHTML = '<div class="alert alert-warning">Camera not initialized. Please restart.</div>';
-            return;
-        }
-        
-        try {
-            const context = canvas.getContext('2d');
-            const width = video.videoWidth || 640;
-            const height = video.videoHeight || 480;
-            
-            canvas.width = width;
-            canvas.height = height;
-            context.drawImage(video, 0, 0, width, height);
-            
-            const imageData = canvas.toDataURL('image/jpeg', 0.9);
-            console.log('Image captured, size:', imageData.length);
-            
-            // Verify image data
-            if (!imageData || imageData.length < 1000) {
-                captureStatus.innerHTML = '<div class="alert alert-danger">Failed to capture image. Please try again.</div>';
-                return;
-            }
-            
-            faceDataInput.value = imageData;
-            isCaptured = true;
-            console.log('Face data saved, length:', faceDataInput.value.length);
-            
-            // Show preview
-            const img = document.createElement('img');
-            img.src = imageData;
-            img.style.maxWidth = '100%';
-            img.style.borderRadius = '10px';
-            img.style.border = '3px solid #28a745';
-            img.style.maxHeight = '300px';
-            
-            captureStatus.innerHTML = `
-                <div class="alert alert-success">
-                    <i class="fas fa-check-circle"></i> ✅ Face captured successfully!
-                    <br><small>You can now click "Enroll Student" to complete enrollment.</small>
-                </div>
-                <div class="text-center mt-2 preview-container">${img.outerHTML}</div>
-            `;
-            
-            submitBtn.disabled = false;
-            captureBtn.disabled = true;
-            resetBtn.disabled = false;
-            stopBtn.disabled = true;
-            
-        } catch (error) {
-            console.error('Capture error:', error);
-            captureStatus.innerHTML = '<div class="alert alert-danger">Error capturing image: ' + error.message + '</div>';
-        }
-    });
-    
-    // ─────────────────────────────────────────────
-    // Stop Camera
-    // ─────────────────────────────────────────────
-    stopBtn.addEventListener('click', function() {
-        console.log('Stop button clicked');
-        if (stream) {
-            stream.getTracks().forEach(function(track) {
-                track.stop();
-            });
-            stream = null;
-            video.srcObject = null;
-            video.style.display = 'none';
-            videoPlaceholder.style.display = 'block';
-            
-            isRunning = false;
-            captureBtn.disabled = true;
-            stopBtn.disabled = true;
-            startBtn.disabled = false;
-            resetBtn.disabled = true;
-            
-            captureStatus.innerHTML = '<div class="alert alert-info">Camera stopped.</div>';
-            console.log('Camera stopped');
-        }
-    });
-    
-    // ─────────────────────────────────────────────
-    // Reset
-    // ─────────────────────────────────────────────
-    resetBtn.addEventListener('click', function() {
-        console.log('Reset button clicked');
-        faceDataInput.value = '';
-        isCaptured = false;
-        submitBtn.disabled = true;
-        captureBtn.disabled = false;
-        resetBtn.disabled = true;
-        stopBtn.disabled = false;
-        captureStatus.innerHTML = '<div class="alert alert-info">Reset. Click "Capture Face" to retake.</div>';
-    });
-    
-    // ─────────────────────────────────────────────
-    // Form Submit
-    // ─────────────────────────────────────────────
-    if (form) {
-        form.addEventListener('submit', function(e) {
-            console.log('Form submitting...');
-            
-            const studentId = document.getElementById('student_id').value.trim();
-            const fullname = document.getElementById('fullname').value.trim();
-            const email = document.getElementById('email').value.trim();
-            const course = document.getElementById('course').value.trim();
-            const level = document.getElementById('level').value.trim();
-            const faceData = faceDataInput.value;
-            
-            console.log('Form data:', {
-                studentId: studentId,
-                fullname: fullname,
-                email: email,
-                course: course,
-                level: level,
-                faceDataLength: faceData ? faceData.length : 0
-            });
-            
-            // Validate all fields
-            if (!studentId) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please enter Student ID.</div>';
-                return false;
-            }
-            
-            if (!fullname) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please enter Full Name.</div>';
-                return false;
-            }
-            
-            if (!email) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please enter Email.</div>';
-                return false;
-            }
-            
-            if (!course) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please enter Course.</div>';
-                return false;
-            }
-
-            if (!level) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please select your Level.</div>';
-                return false;
-            }
-            
-            if (!faceData || faceData.length < 1000) {
-                e.preventDefault();
-                captureStatus.innerHTML = '<div class="alert alert-danger">Please capture a face photo before enrolling.</div>';
-                return false;
-            }
-            
-            // Show loading state
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Enrolling...';
-            console.log('Form submitted successfully');
-            return true;
-        });
-    }
-    
-    // ─────────────────────────────────────────────
-    // Cleanup on page unload
-    // ─────────────────────────────────────────────
-    window.addEventListener('beforeunload', function() {
-        if (stream) {
-            stream.getTracks().forEach(function(track) {
-                track.stop();
-            });
-            stream = null;
-        }
-        console.log('Cleanup completed');
-    });
-    
-    console.log('Enroll page initialization complete');
-});
-</script>
+<script src="{{ url_for('static', filename='js/multi_capture.js') }}"></script>
 {% endblock %}

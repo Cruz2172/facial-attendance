@@ -234,9 +234,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     // Check for enrollment page
     else if (path.includes('enroll') && !path.includes('token')) {
-        if (document.getElementById('enrollVideo') || document.getElementById('startCameraBtn')) {
-            initEnrollPage();
-        }
+        // Enrollment camera is handled by js/multi_capture.js (loaded by the enroll
+        // page itself). Binding it here too would attach every handler twice.
     }
     // Check for dashboard
     else if (path.includes('dashboard')) {

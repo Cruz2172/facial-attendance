@@ -12,7 +12,7 @@ the face data comes from face_cache.py (shared safely between workers).
 from flask import current_app
 
 from .face_cache import get_state, get_roster_ids
-from .face_core import identify
+from .face_core import identify_people
 
 
 def identify_face(face_encoding, known_encodings, known_students,
@@ -29,7 +29,8 @@ def identify_face(face_encoding, known_encodings, known_students,
     if known_encodings is None or len(known_encodings) == 0:
         return None, None, 'unknown'
     matrix = np.asarray(known_encodings)
-    idx, dist, status = identify(matrix, face_encoding, threshold, margin)
+    idx, dist, status = identify_people(
+        matrix, np.arange(len(matrix)), face_encoding, threshold, margin)
     return (known_students[idx] if idx is not None else None), dist, status
 
 
@@ -42,8 +43,11 @@ def identify_student_for_course(face_encoding, course_id):
     status: 'ok' | 'unknown' | 'ambiguous' | 'not_enrolled'
     """
     state = get_state()
-    idx, dist, status = identify(
-        state.matrix, face_encoding,
+    # Each student has several templates (different poses); distance is taken to
+    # the closest template of each PERSON, and the ambiguity margin is measured
+    # against the next different person - never against the same person's other photos.
+    idx, dist, status = identify_people(
+        state.matrix, state.starts, face_encoding,
         current_app.config['CONFIDENCE_THRESHOLD'],
         current_app.config['MATCH_MARGIN'],
     )

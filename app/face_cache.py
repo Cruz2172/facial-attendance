@@ -21,7 +21,7 @@ from flask import current_app
 from sqlalchemy import update
 
 from .extensions import db
-from .face_core import ENCODING_LEN, parse_encoding
+from .face_core import ENCODING_LEN, parse_encodings
 from .models import AppState, CourseEnrollment, Student
 
 FaceRecord = namedtuple('FaceRecord', 'id user_id student_id fullname email course')
@@ -39,8 +39,9 @@ class _FaceState:
     def __init__(self):
         self.faces_version = None
         self.roster_version = None
-        self.matrix = np.empty((0, ENCODING_LEN))
-        self.records = ()
+        self.matrix = np.empty((0, ENCODING_LEN))   # every template of every person, stacked
+        self.starts = np.empty(0, dtype=np.intp)    # starts[i] = first row of person i's templates
+        self.records = ()                           # records[i] describes person i
         self.user_to_index = {}
         self.rosters = {}                  # course_id -> frozenset(student pk)
         self.checked_at = 0.0
@@ -115,17 +116,19 @@ def _load_faces():
         Student.email, Student.course, Student.face_encoding,
     ).all()
 
-    vectors, records = [], []
+    blocks, starts, records, next_row = [], [], [], 0
     for row in rows:
-        enc = parse_encoding(row.face_encoding)
-        if enc is None:
+        templates = parse_encodings(row.face_encoding)      # (k, 128): 1 template (legacy) or several
+        if templates is None:
             continue
-        vectors.append(enc)
+        blocks.append(templates)
+        starts.append(next_row)
+        next_row += len(templates)
         records.append(FaceRecord(row.id, row.user_id, row.student_id,
                                   row.fullname, row.email, row.course))
 
-    matrix = np.vstack(vectors) if vectors else np.empty((0, ENCODING_LEN))
-    return matrix, tuple(records)
+    matrix = np.vstack(blocks) if blocks else np.empty((0, ENCODING_LEN))
+    return matrix, np.asarray(starts, dtype=np.intp), tuple(records)
 
 
 def get_state():
@@ -150,7 +153,7 @@ def get_state():
         st = _state
         if st.faces_version != faces_v:
             try:
-                matrix, records = _load_faces()
+                matrix, starts, records = _load_faces()
             except Exception:
                 db.session.rollback()
                 current_app.logger.exception('Could not load known faces')
@@ -158,12 +161,12 @@ def get_state():
                     return st
                 raise
             new = _FaceState()
-            new.matrix, new.records = matrix, records
+            new.matrix, new.starts, new.records = matrix, starts, records
             new.user_to_index = {r.user_id: i for i, r in enumerate(records)}
             new.faces_version = faces_v
             new.roster_version = roster_v
             _state = st = new
-            current_app.logger.info('Face cache loaded: %d faces', len(records))
+            current_app.logger.info('Face cache loaded: %d people, %d templates', len(records), len(matrix))
         elif st.roster_version != roster_v:
             st.rosters = {}
             st.roster_version = roster_v
@@ -175,9 +178,10 @@ def get_state():
 # Public helpers
 # ---------------------------------------------------------------------------
 def get_known_faces():
-    """(list of encodings, list of FaceRecord) for every enrolled face."""
+    """(list of encodings, list of FaceRecord): one encoding per person (their
+    first template). Kept for compatibility; matching uses get_state()."""
     st = get_state()
-    return list(st.matrix), list(st.records)
+    return [st.matrix[s] for s in st.starts], list(st.records)
 
 
 def get_roster_ids(course_id):
@@ -201,7 +205,7 @@ def get_course_roster(course_id):
     st = get_state()
     roster = get_roster_ids(course_id)
     idx = [i for i, r in enumerate(st.records) if r.id in roster]
-    return [st.matrix[i] for i in idx], [st.records[i] for i in idx]
+    return [st.matrix[st.starts[i]] for i in idx], [st.records[i] for i in idx]
 
 
 def reset_for_tests():

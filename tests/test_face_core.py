@@ -44,7 +44,7 @@ def test_decode_never_enlarges():
     assert rgb.shape[:2] == (100, 100)
 
 
-@pytest.mark.parametrize('bad', [None, '', '   ', 'hello', 'data:text/plain;base64,aGk=',
+@pytest.mark.parametize('bad', [None, '', '   ', 'hello', 'data:text/plain;base64,aGk=',
                                  'data:image/jpeg;base64,', 'data:image/jpeg;base64,@@@@',
                                  'data:image/jpeg;base64,' + base64.b64encode(b'not an image').decode(),
                                  12345])
