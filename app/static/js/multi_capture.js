@@ -1,19 +1,22 @@
 /*
- * Multi-photo face capture for student enrollment.
+ * Guided multi-photo face capture for student enrollment.
  *
- * Guides the student through several photos with slightly different head
- * positions and expressions (straight, left, right, up, smile...). Capturing
- * varied photos lets the system recognise the student under different
- * conditions at attendance time.
+ * There is NO capture button. The student follows the on-screen instruction for
+ * each pose (straight, left, right, up, smile, ...). About twice a second the
+ * page sends a small camera frame to the server (/enroll/pose-check), which
+ * measures the head position and answers "good" or tells the student what to
+ * fix. A photo is taken automatically only after the pose has been held
+ * correctly for several checks in a row. The server re-checks every submitted
+ * photo again when the form is posted, so the rules cannot be skipped.
  *
  * Used by templates/enroll.html and templates/student/dashboard.html.
  * It is the ONLY script that controls the enrollment camera buttons.
  *
  * Page contract (element ids):
- *   form#enrollForm  [data-capture-count] [data-min-images]
- *   video#enrollVideo, #videoPlaceholder, #cameraLoading
- *   #startCameraBtn, #captureBtn, #stopCameraBtn, #resetBtn, #submitBtn
- *   input#face_images (hidden; receives a JSON array of JPEG data-URLs)
+ *   form#enrollForm  [data-capture-count] [data-hold-count] [data-check-interval]
+ *   video#enrollVideo (inside a container), #videoPlaceholder, #cameraLoading
+ *   #startCameraBtn, #captureBtn (hidden by this script), #stopCameraBtn, #resetBtn, #submitBtn
+ *   input#face_images (hidden; receives a JSON array of JPEG data-URLs, in pose order)
  *   #captureSteps (instructions + thumbnails), #captureStatus (messages)
  */
 (function () {
@@ -21,19 +24,24 @@
 
     var POSES = [
         { title: 'Look straight at the camera', hint: 'Relaxed, neutral face. Eyes on the lens.' },
-        { title: 'Turn your head slightly to the LEFT', hint: 'Just a little (about 15-20 degrees). Your whole face must stay visible.' },
-        { title: 'Turn your head slightly to the RIGHT', hint: 'Just a little (about 15-20 degrees). Your whole face must stay visible.' },
-        { title: 'Tilt your head slightly UP', hint: 'Raise your chin a little. Keep looking at the camera.' },
-        { title: 'Smile naturally', hint: 'A normal smile, face straight to the camera.' },
+        { title: 'Turn your head to YOUR left', hint: 'Turn a little (about 15-25 degrees) and keep your whole face visible.' },
+        { title: 'Turn your head to YOUR right', hint: 'Turn a little (about 15-25 degrees) and keep your whole face visible.' },
+        { title: 'Raise your chin slightly (look up)', hint: 'Tilt your head up a little. Keep looking at the camera.' },
+        { title: 'Smile naturally', hint: 'A clear smile, face straight to the camera.' },
         { title: 'Look straight, a little closer', hint: 'Move slightly nearer to the camera.' },
-        { title: 'Tilt your head slightly DOWN', hint: 'Lower your chin a little. Keep your eyes visible.' }
+        { title: 'Lower your chin slightly (look down)', hint: 'Tilt your head down a little. Keep your eyes visible.' }
     ];
 
-    var MAX_SIDE = 800;            // photos are downscaled to this on the long side
+    var CHECK_SIDE = 640;          // long side of the frame sent for checking
+    var STORE_SIDE = 800;          // long side of the stored photo
+    var CHECK_QUALITY = 0.7;
     var JPEG_QUALITY = 0.9;
+    var COOLDOWN_MS = 1400;        // pause after a photo so the next pose is a fresh start
     var MIN_BRIGHTNESS = 45;       // 0-255 average luminance
     var MAX_BRIGHTNESS = 225;
     var MAX_TOTAL_CHARS = 4200000; // stay under the server's 5 MB request limit
+    var MAX_FAILURES = 6;          // consecutive failed checks before we tell the student
+    var CHECK_TIMEOUT_MS = 8000;   // a stalled request must never freeze the capture loop
 
     function byId(id) { return document.getElementById(id); }
 
@@ -46,6 +54,7 @@
             '.mc-banner.done{background:#eafaf0;border-color:#b6e8c7}' +
             '.mc-banner .mc-title{font-weight:700}' +
             '.mc-banner .mc-hint{font-size:.85rem;color:#555}' +
+            '.mc-banner .mc-auto{font-size:.8rem;color:#0d6efd;margin-top:.25rem}' +
             '.mc-thumbs{display:flex;gap:.5rem;flex-wrap:wrap;justify-content:center;margin-bottom:.5rem}' +
             '.mc-thumb{width:68px;height:68px;border-radius:10px;border:2px dashed #b8c2d0;display:flex;align-items:center;' +
             'justify-content:center;font-weight:700;color:#8793a5;background:#fff;position:relative;overflow:hidden;padding:0}' +
@@ -54,7 +63,15 @@
             '.mc-thumb img{width:100%;height:100%;object-fit:cover;display:block}' +
             '.mc-thumb .mc-badge{position:absolute;left:3px;bottom:3px;background:rgba(0,0,0,.6);color:#fff;font-size:.7rem;' +
             'border-radius:6px;padding:0 5px;line-height:1.3}' +
-            '.mc-progress{text-align:center;font-size:.85rem;color:#555}';
+            '.mc-progress{text-align:center;font-size:.85rem;color:#555}' +
+            '.mc-oval{position:absolute;left:50%;top:50%;width:50%;height:82%;transform:translate(-50%,-50%);' +
+            'border:3px dashed rgba(255,255,255,.9);border-radius:50%;pointer-events:none;transition:border-color .2s,box-shadow .2s;z-index:2}' +
+            '.mc-oval.ok{border-style:solid;border-color:#28d058;box-shadow:0 0 14px rgba(40,208,88,.7)}' +
+            '.mc-oval.bad{border-color:#ffb020}' +
+            '.mc-live{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);max-width:92%;padding:.35rem .8rem;' +
+            'border-radius:999px;background:rgba(0,0,0,.72);color:#fff;font-size:.9rem;text-align:center;pointer-events:none;z-index:3}' +
+            '.mc-live.ok{background:rgba(25,135,84,.9)}' +
+            '.mc-live.bad{background:rgba(160,90,0,.9)}';
         document.head.appendChild(css);
     }
 
@@ -81,14 +98,53 @@
 
         var requested = parseInt(form.getAttribute('data-capture-count'), 10) || 5;
         var count = Math.max(1, Math.min(requested, POSES.length));
-        var minRequired = Math.max(1, Math.min(parseInt(form.getAttribute('data-min-images'), 10) || 3, count));
+        var holdCount = Math.max(1, parseInt(form.getAttribute('data-hold-count'), 10) || 3);
+        var checkInterval = Math.max(150, parseInt(form.getAttribute('data-check-interval'), 10) || 450);
+
+        // The poses are not optional: every one of them must be captured.
+        var minRequired = count;
 
         var photos = [];
         for (var i = 0; i < count; i++) { photos.push(null); }
 
         var stream = null;
         var running = false;
+        var baseline = null;          // measurements from the straight photo, returned by the server
+        var okStreak = 0;
+        var candidate = null;
+        var inFlight = false;
+        var loopTimer = null;
+        var cooldownUntil = 0;
+        var failures = 0;
+        var requestSeq = 0;           // identifies the current request so a late reply from an abandoned one is ignored
         var submitLabel = submitBtn.innerHTML;
+
+        var checkCanvas = document.createElement('canvas');
+        var holdCanvas = document.createElement('canvas');
+
+        // The capture button no longer exists as far as the student is concerned.
+        captureBtn.style.display = 'none';
+        captureBtn.disabled = true;
+
+        // Guide oval + live message, drawn over the video.
+        var container = video.parentNode;
+        var oval = document.createElement('div');
+        oval.className = 'mc-oval';
+        oval.style.display = 'none';
+        var live = document.createElement('div');
+        live.className = 'mc-live';
+        live.setAttribute('role', 'status');
+        live.setAttribute('aria-live', 'polite');
+        live.style.display = 'none';
+        if (container) {
+            try {
+                if (window.getComputedStyle && window.getComputedStyle(container).position === 'static') {
+                    container.style.position = 'relative';
+                }
+            } catch (e) { /* ignore */ }
+            container.appendChild(oval);
+            container.appendChild(live);
+        }
 
         // ---------------------------------------------------------------- helpers
         function setStatus(kind, text) {
@@ -99,6 +155,12 @@
             box.setAttribute('role', kind === 'danger' ? 'alert' : 'status');
             box.textContent = text;
             statusBox.appendChild(box);
+        }
+
+        function setLive(text, state) {
+            live.textContent = text || '';
+            live.className = 'mc-live' + (state ? ' ' + state : '');
+            oval.className = 'mc-oval' + (state === 'ok' ? ' ok' : (state === 'bad' ? ' bad' : ''));
         }
 
         function firstEmpty() {
@@ -118,14 +180,6 @@
             return out;
         }
 
-        function setCaptureLabel(text, iconClass) {
-            captureBtn.textContent = '';
-            var icon = document.createElement('i');
-            icon.className = iconClass;
-            captureBtn.appendChild(icon);
-            captureBtn.appendChild(document.createTextNode(' ' + text));
-        }
-
         // ---------------------------------------------------------------- rendering
         function render() {
             var next = firstEmpty();
@@ -140,15 +194,19 @@
             title.className = 'mc-title';
             var hint = document.createElement('div');
             hint.className = 'mc-hint';
+            banner.appendChild(title);
+            banner.appendChild(hint);
             if (next === -1) {
                 title.textContent = 'All ' + count + ' photos captured';
-                hint.textContent = 'You can enroll now. Click a photo to retake it.';
+                hint.textContent = 'Tick the consent box and press Enroll. Click a photo to retake it.';
             } else {
                 title.textContent = 'Photo ' + (next + 1) + ' of ' + count + ': ' + POSES[next].title;
                 hint.textContent = POSES[next].hint;
+                var auto = document.createElement('div');
+                auto.className = 'mc-auto';
+                auto.textContent = 'Hold the pose inside the oval. The camera takes the photo by itself.';
+                banner.appendChild(auto);
             }
-            banner.appendChild(title);
-            banner.appendChild(hint);
             stepsBox.appendChild(banner);
 
             var thumbs = document.createElement('div');
@@ -181,31 +239,32 @@
 
             var progress = document.createElement('div');
             progress.className = 'mc-progress';
-            progress.textContent = filled + ' of ' + count + ' captured (at least ' + minRequired + ' required)';
+            progress.textContent = filled + ' of ' + count + ' captured (all are required)';
             stepsBox.appendChild(progress);
 
-            // hidden field + buttons
             imagesInput.value = filled ? JSON.stringify(filledPhotos()) : '';
             submitBtn.disabled = filled < minRequired;
             resetBtn.disabled = filled === 0;
-            captureBtn.disabled = !running || next === -1;
-            if (next === -1) {
-                setCaptureLabel('All photos captured', 'fas fa-check');
-            } else {
-                setCaptureLabel('Capture photo ' + (next + 1) + ' of ' + count, 'fas fa-camera');
-            }
         }
 
         // ---------------------------------------------------------------- camera
         function stopStream() {
+            if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
             if (stream) {
                 stream.getTracks().forEach(function (track) { track.stop(); });
             }
             stream = null;
             video.srcObject = null;
             video.style.display = 'none';
+            video.style.transform = '';
             if (placeholder) { placeholder.style.display = 'block'; }
+            oval.style.display = 'none';
+            live.style.display = 'none';
             running = false;
+            inFlight = false;
+            requestSeq++;
+            okStreak = 0;
+            candidate = null;
         }
 
         function cameraErrorText(error) {
@@ -228,13 +287,14 @@
             setStatus('info', 'Requesting camera access...');
 
             navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: false
             }).then(function (mediaStream) {
                 stream = mediaStream;
                 video.srcObject = mediaStream;
                 video.setAttribute('playsinline', 'true');
                 video.style.display = 'block';
+                video.style.transform = 'scaleX(-1)';     // mirror preview, like a mirror: turning left looks like turning left
                 if (placeholder) { placeholder.style.display = 'none'; }
                 if (loading) { loading.style.display = 'none'; }
 
@@ -242,10 +302,15 @@
                     var played = video.play();
                     var ready = function () {
                         running = true;
+                        failures = 0;
                         stopBtn.disabled = false;
                         startBtn.disabled = true;
-                        setStatus('success', 'Camera ready. Follow the instructions above and press the capture button for each photo.');
+                        oval.style.display = 'block';
+                        live.style.display = 'block';
+                        setStatus('success', 'Camera ready. Put your face inside the oval and follow the instructions. Photos are taken automatically.');
+                        setLive('Looking for your face...', '');
                         render();
+                        scheduleLoop(300);
                     };
                     if (played && typeof played.then === 'function') {
                         played.then(ready).catch(function (err) {
@@ -271,7 +336,12 @@
             render();
         });
 
-        // ---------------------------------------------------------------- capture
+        // ---------------------------------------------------------------- the checking loop
+        function scheduleLoop(delay) {
+            if (loopTimer) { clearTimeout(loopTimer); }
+            loopTimer = setTimeout(tick, delay);
+        }
+
         function averageBrightness(sourceCanvas) {
             var probe = document.createElement('canvas');
             probe.width = 32;
@@ -286,70 +356,231 @@
             return total / (data.length / 4);
         }
 
-        captureBtn.addEventListener('click', function () {
-            var slot = firstEmpty();
-            if (slot === -1) { return; }
-            if (!running || !stream) {
-                setStatus('warning', 'The camera is not running. Press "Start Camera" first.');
+        function drawFrame(target, maxSide) {
+            var scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+            target.width = Math.round(video.videoWidth * scale);
+            target.height = Math.round(video.videoHeight * scale);
+            target.getContext('2d').drawImage(video, 0, 0, target.width, target.height);
+        }
+
+        function tick() {
+            loopTimer = null;
+            if (!running) { return; }
+
+            if (firstEmpty() === -1) {
+                setLive('All photos captured', 'ok');
+                return;
+            }
+            if (document.hidden || inFlight || Date.now() < cooldownUntil) {
+                scheduleLoop(checkInterval);
                 return;
             }
             if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-                setStatus('warning', 'The camera is not ready yet. Please wait a moment and try again.');
+                scheduleLoop(checkInterval);
                 return;
             }
 
-            try {
-                var scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
-                var width = Math.round(video.videoWidth * scale);
-                var height = Math.round(video.videoHeight * scale);
+            var slot = firstEmpty();
 
-                var canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                canvas.getContext('2d').drawImage(video, 0, 0, width, height);
+            drawFrame(holdCanvas, STORE_SIDE);                  // the frame that may become the photo
+            drawFrame(checkCanvas, CHECK_SIDE);                 // the (smaller) frame that is checked
 
-                var brightness = averageBrightness(canvas);
-                if (brightness < MIN_BRIGHTNESS) {
-                    setStatus('warning', 'The image is too dark. Face a light source (a window or lamp) and try again.');
-                    return;
-                }
-                if (brightness > MAX_BRIGHTNESS) {
-                    setStatus('warning', 'The image is too bright or washed out. Avoid strong light directly behind or on your face and try again.');
-                    return;
-                }
-
-                var dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-                if (!dataUrl || dataUrl.length < 1000) {
-                    setStatus('danger', 'Failed to capture the image. Please try again.');
-                    return;
-                }
-
-                photos[slot] = dataUrl;
-                var next = firstEmpty();
-                if (next === -1) {
-                    setStatus('success', 'All photos captured. Tick the consent box and press "Enroll".');
-                } else {
-                    setStatus('success', 'Photo ' + (slot + 1) + ' saved. Next: ' + POSES[next].title + '.');
-                }
-                render();
-            } catch (error) {
-                setStatus('danger', 'Error capturing the image: ' + (error && error.message ? error.message : 'unknown error'));
+            var brightness = averageBrightness(checkCanvas);
+            if (brightness < MIN_BRIGHTNESS) {
+                okStreak = 0;
+                setLive('Too dark: face a window or lamp.', 'bad');
+                scheduleLoop(checkInterval);
+                return;
             }
-        });
+            if (brightness > MAX_BRIGHTNESS) {
+                okStreak = 0;
+                setLive('Too bright: avoid strong light on or behind you.', 'bad');
+                scheduleLoop(checkInterval);
+                return;
+            }
+
+            inFlight = true;
+            var mine = ++requestSeq;
+            var payload = { image: checkCanvas.toDataURL('image/jpeg', CHECK_QUALITY), pose_index: slot, baseline: baseline };
+            var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+
+            function connectionProblem() {
+                inFlight = false;
+                if (!running) { return; }
+                failures++;
+                okStreak = 0;
+                setLive('Connection problem. Retrying...', 'bad');
+                if (failures >= MAX_FAILURES) {
+                    setStatus('danger', 'The server cannot be reached. Check your connection, then reload this page.');
+                }
+                scheduleLoop(Math.max(checkInterval, 1000));
+            }
+
+            // If the server never answers, give up on this request and carry on.
+            var timeoutId = setTimeout(function () {
+                if (mine !== requestSeq || !inFlight) { return; }
+                requestSeq++;                       // anything this request returns later is ignored
+                if (controller) { try { controller.abort(); } catch (e) { /* ignore */ } }
+                connectionProblem();
+            }, CHECK_TIMEOUT_MS);
+
+            var options = {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                body: JSON.stringify(payload)
+            };
+            if (controller) { options.signal = controller.signal; }
+
+            fetch('/enroll/pose-check', options).then(function (response) {
+                return response.json().catch(function () { return {}; }).then(function (data) {
+                    return { status: response.status, data: data };
+                });
+            }).then(function (result) {
+                clearTimeout(timeoutId);
+                if (mine !== requestSeq) { return; }       // abandoned (timed out, retaken or stopped)
+                inFlight = false;
+                if (!running) { return; }
+                handleResult(slot, result.status, result.data || {});
+            }).catch(function () {
+                clearTimeout(timeoutId);
+                if (mine !== requestSeq) { return; }
+                connectionProblem();
+            });
+        }
+
+        function abandonRequest() {
+            // Whatever the server answers for the request that is in flight is now stale.
+            requestSeq++;
+            inFlight = false;
+        }
+
+        function csrfToken() {
+            var meta = document.querySelector('meta[name="csrf-token"]');
+            return meta ? meta.getAttribute('content') : '';
+        }
+
+        function handleResult(slot, status, data) {
+            if (slot !== firstEmpty()) {            // the photos changed while this check was running
+                okStreak = 0;
+                candidate = null;
+                scheduleLoop(checkInterval);
+                return;
+            }
+            if (status === 401 || data.login_required) {
+                stopStream();
+                setStatus('danger', 'Your login expired. Redirecting to the login page...');
+                setTimeout(function () { window.location.href = '/login'; }, 2000);
+                return;
+            }
+            if (data.csrf) {
+                stopStream();
+                setStatus('danger', 'This page expired. Please refresh it and start again.');
+                return;
+            }
+            if (data.busy || status === 503 || status === 429) {
+                okStreak = 0;
+                setLive('Server is busy. Retrying...', '');
+                scheduleLoop(Math.max(checkInterval, 1200));
+                return;
+            }
+            if (!data.success) {
+                failures++;
+                okStreak = 0;
+                setLive(data.message || 'Could not check this frame.', 'bad');
+                if (failures >= MAX_FAILURES) {
+                    setStatus('danger', 'The position check is not working. Reload the page, or contact an administrator.');
+                }
+                scheduleLoop(Math.max(checkInterval, 900));
+                return;
+            }
+
+            failures = 0;
+            if (!data.ok) {
+                okStreak = 0;
+                candidate = null;
+                setLive(data.message || 'Adjust your position.', 'bad');
+                scheduleLoop(checkInterval);
+                return;
+            }
+
+            // Good pose. The frame that was just checked is still on holdCanvas.
+            okStreak++;
+            candidate = holdCanvas.toDataURL('image/jpeg', JPEG_QUALITY);
+            if (okStreak < holdCount) {
+                setLive('Good. Hold still... (' + okStreak + '/' + holdCount + ')', 'ok');
+                scheduleLoop(checkInterval);
+                return;
+            }
+            acceptPhoto(slot, data);
+        }
+
+        function acceptPhoto(slot, data) {
+            if (!candidate || candidate.length < 1000) {
+                okStreak = 0;
+                setLive('Could not save the frame. Hold the pose again.', 'bad');
+                scheduleLoop(checkInterval);
+                return;
+            }
+            if (slot === 0) {
+                if (!data.baseline) {
+                    okStreak = 0;
+                    setLive('Could not measure your face. Hold still and try again.', 'bad');
+                    scheduleLoop(checkInterval);
+                    return;
+                }
+                baseline = data.baseline;
+            }
+
+            photos[slot] = candidate;
+            candidate = null;
+            okStreak = 0;
+            cooldownUntil = Date.now() + COOLDOWN_MS;
+
+            var next = firstEmpty();
+            if (next === -1) {
+                setLive('All photos captured', 'ok');
+                setStatus('success', 'All photos captured. Tick the consent box and press "Enroll".');
+            } else {
+                setLive('Photo ' + (slot + 1) + ' saved. Next: ' + POSES[next].title, 'ok');
+                setStatus('success', 'Photo ' + (slot + 1) + ' saved. Next: ' + POSES[next].title + '.');
+            }
+            render();
+            if (next !== -1) { scheduleLoop(COOLDOWN_MS); }
+        }
 
         // ---------------------------------------------------------------- retake / reset
         function retake(index) {
-            photos[index] = null;
-            setStatus('info', 'Photo ' + (index + 1) + ' removed. ' + (running
-                ? 'Retake it with: ' + POSES[index].title + '.'
-                : 'Start the camera to retake it.'));
+            if (index === 0) {
+                // Every other pose is measured against photo 1, so they must all be redone.
+                for (var k = 0; k < photos.length; k++) { photos[k] = null; }
+                baseline = null;
+                setStatus('info', 'Photo 1 removed. The other photos are compared with it, so please retake all of them.');
+            } else {
+                photos[index] = null;
+                setStatus('info', 'Photo ' + (index + 1) + ' removed. ' + (running
+                    ? 'Retake it: ' + POSES[index].title + '.'
+                    : 'Start the camera to retake it.'));
+            }
+            abandonRequest();
+            okStreak = 0;
+            candidate = null;
             render();
+            if (running) { scheduleLoop(300); }
         }
 
         resetBtn.addEventListener('click', function () {
             for (var k = 0; k < photos.length; k++) { photos[k] = null; }
+            baseline = null;
+            abandonRequest();
+            okStreak = 0;
+            candidate = null;
             setStatus('info', 'All photos cleared. ' + (running ? 'Start again with photo 1.' : 'Start the camera to begin.'));
             render();
+            if (running) { scheduleLoop(300); }
+        });
+
+        document.addEventListener('visibilitychange', function () {
+            if (running && !document.hidden && !loopTimer && !inFlight) { scheduleLoop(200); }
         });
 
         // ---------------------------------------------------------------- submit
@@ -374,7 +605,7 @@
             var filled = filledCount();
             if (filled < minRequired) {
                 event.preventDefault();
-                setStatus('danger', 'Please capture at least ' + minRequired + ' photos (you have ' + filled + ').');
+                setStatus('danger', 'All ' + minRequired + ' guided photos are required (you have ' + filled + ').');
                 return false;
             }
             if (imagesInput.value.length > MAX_TOTAL_CHARS) {

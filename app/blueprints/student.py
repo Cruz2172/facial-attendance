@@ -1,7 +1,7 @@
 import re
 from datetime import datetime, timedelta
 
-from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app
+from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app, jsonify
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -15,10 +15,10 @@ from ..models import (
     AttendanceSession, CourseAttendanceRecord, InviteCode, CourseEnrollmentToken
 )
 from ..utils import invalidate_face_cache, invalidate_course_roster_cache
-from ..face_core import serialize_encodings
+from ..face_core import FaceBusy, serialize_encodings
 from ..services.enrollment import (
     EnrollmentError, validate_enrollment_form, check_not_already_enrolled,
-    parse_face_images, encode_enrollment_images, reject_if_duplicate,
+    parse_face_images, encode_enrollment_images, reject_if_duplicate, check_pose_frame,
     save_face_image
 )
 
@@ -451,6 +451,37 @@ def student_attendance_stats():
 # ─────────────────────────────────────────────
 # Face Enrollment
 # ─────────────────────────────────────────────
+
+@student_bp.route('/enroll/pose-check', methods=['POST'])
+@limiter.limit(lambda: current_app.config['POSE_CHECK_RATE_LIMIT'], key_func=user_or_ip)
+@login_required
+def enroll_pose_check():
+    """Live guidance for the guided capture page.
+
+    The browser posts a small camera frame about twice a second, together with
+    the number of the pose being asked for (0 = straight, 1 = left, ...). The
+    reply says whether the student is in the right position and, if not, what to
+    fix. The page only takes a photo after several consecutive good replies; the
+    final /enroll request is re-checked on the server regardless."""
+    if session.get('user_role') != 'student':
+        return jsonify({'success': False, 'message': 'Only students can enroll a face.'}), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'Invalid request.'}), 400
+
+    try:
+        result = check_pose_frame(data.get('image'), data.get('pose_index'), data.get('baseline'))
+    except FaceBusy:
+        return jsonify({'success': False, 'busy': True, 'message': 'Server is busy, retrying...'}), 503
+    except EnrollmentError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception:
+        current_app.logger.exception('Pose check failed')
+        return jsonify({'success': False, 'message': 'Could not check the frame. Retrying...'}), 500
+
+    return jsonify({'success': True, **result})
+
 
 @student_bp.route('/enroll', methods=['GET', 'POST'])
 @limiter.limit(lambda: current_app.config['ENROLL_RATE_LIMIT'], key_func=user_or_ip, methods=['POST'])

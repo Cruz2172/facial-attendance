@@ -44,7 +44,7 @@ def test_decode_never_enlarges():
     assert rgb.shape[:2] == (100, 100)
 
 
-@pytest.mark.parametize('bad', [None, '', '   ', 'hello', 'data:text/plain;base64,aGk=',
+@pytest.mark.parametrize('bad', [None, '', '   ', 'hello', 'data:text/plain;base64,aGk=',
                                  'data:image/jpeg;base64,', 'data:image/jpeg;base64,@@@@',
                                  'data:image/jpeg;base64,' + base64.b64encode(b'not an image').decode(),
                                  12345])
@@ -247,3 +247,144 @@ def test_gate_under_threads():
     threads = [threading.Thread(target=work) for _ in range(12)]
     [t.start() for t in threads]; [t.join() for t in threads]
     assert peak[0] <= 2
+
+
+# =========================== multi-image enrollment ==========================
+def pose_templates(base, n, spread):
+    """n photos of ONE person: the base face plus small pose/expression drifts."""
+    return np.vstack([base] + [noisy(base, spread) for _ in range(n - 1)])
+
+
+def stack_people(people):
+    """-> (matrix, starts) the way face_cache builds them."""
+    matrix = np.vstack(people)
+    starts = np.cumsum([0] + [len(p) for p in people[:-1]])
+    return matrix, starts
+
+
+def test_parse_encodings_reads_legacy_and_multi_format():
+    one = json.dumps(list(np.linspace(0, 1, 128)))
+    assert fc.parse_encodings(one).shape == (1, 128)                       # legacy
+    multi = json.dumps([list(np.linspace(0, 1, 128))] * 5)
+    assert fc.parse_encodings(multi).shape == (5, 128)                     # current
+    assert fc.parse_encoding(multi).shape == (128,)                        # first template
+
+
+def test_parse_encodings_drops_bad_rows_and_caps_count():
+    good = list(np.linspace(0, 1, 128))
+    mixed = json.dumps([good, [1, 2, 3], good, [float('nan')] * 128])
+    assert fc.parse_encodings(mixed).shape == (2, 128)
+    assert fc.parse_encodings(json.dumps([good] * 25)).shape == (fc.MAX_TEMPLATES_PER_PERSON, 128)
+    for bad in [None, '', '[]', '[[]]', '[1,2,3]', 'oops', '{"a": 1}', json.dumps([[1, 2], [3, 4]])]:
+        assert fc.parse_encodings(bad) is None
+
+
+def test_serialize_roundtrip():
+    encs = [rng.normal(0, 0.09, 128) for _ in range(4)]
+    back = fc.parse_encodings(fc.serialize_encodings(encs))
+    assert back.shape == (4, 128) and np.allclose(back, np.vstack(encs))
+
+
+def test_own_templates_never_make_a_person_ambiguous():
+    me = pose_templates(make_db(1)[0], 5, 0.12)            # 5 close photos of one person
+    others = [pose_templates(v, 3, 0.12) for v in make_db(40)]
+    matrix, starts = stack_people([me] + others)
+    probe = noisy(me[0], 0.25)
+
+    idx, dist, status = fc.identify_people(matrix, starts, probe, 0.50, 0.07)
+    assert (idx, status) == (0, 'ok')
+    # the old row-by-row logic would wrongly call this ambiguous: my own 2nd photo is the "runner-up"
+    assert fc.identify(matrix, probe, 0.50, 0.07)[2] == 'ambiguous'
+
+
+def orthonormal(k):
+    """k exactly-orthogonal unit directions, so distances add predictably."""
+    q, _ = np.linalg.qr(rng.normal(0, 1, (128, k)))
+    return [q[:, i] for i in range(k)]
+
+
+def test_extra_poses_rescue_a_match_the_frontal_photo_misses():
+    u, v = orthonormal(2)
+    base = make_db(1)[0]
+    turned = base + 0.55 * u                                 # same person, head turned (within 0.55)
+    probe = turned + 0.10 * v                                # later scan, head still turned
+    assert np.linalg.norm(probe - base) > 0.50               # frontal-only enrollment would reject
+    assert np.linalg.norm(probe - turned) < 0.11
+
+    singles, s_starts = stack_people([base.reshape(1, -1)] + [x.reshape(1, -1) for x in make_db(30)])
+    assert fc.identify_people(singles, s_starts, probe, 0.50, 0.07)[2] == 'unknown'
+
+    matrix, starts = stack_people([np.vstack([base, turned])] + [x.reshape(1, -1) for x in make_db(30)])
+    idx, dist, status = fc.identify_people(matrix, starts, probe, 0.50, 0.07)
+    assert (idx, status) == (0, 'ok') and dist == pytest.approx(0.10, abs=1e-6)
+
+
+def test_uneven_template_counts_map_to_the_right_person():
+    people = [pose_templates(v, n, 0.1) for v, n in zip(make_db(6), (1, 5, 3, 7, 2, 4))]
+    matrix, starts = stack_people(people)
+    for i, p in enumerate(people):
+        idx, _, status = fc.identify_people(matrix, starts, noisy(p[-1], 0.15), 0.50, 0.07)
+        assert (idx, status) == (i, 'ok'), i
+
+
+def test_lookalike_person_is_still_ambiguous():
+    u, w, e1, e2 = orthonormal(4)
+    a = make_db(1)[0]
+    probe = a + 0.30 * u
+    person_a = np.vstack([a, a + 0.05 * e1, a + 0.05 * e2])  # best template is 0.30 from the probe
+    person_b = (probe + 0.34 * w).reshape(1, -1)              # a different person only 0.04 behind
+    matrix, starts = stack_people([person_a, person_b])
+    idx, dist, status = fc.identify_people(matrix, starts, probe, 0.50, 0.07)
+    assert status == 'ambiguous' and idx is None and dist == pytest.approx(0.30, abs=1e-6)
+
+
+def test_unknown_and_empty_with_people_api():
+    matrix, starts = stack_people([pose_templates(v, 3, 0.1) for v in make_db(10)])
+    assert fc.identify_people(matrix, starts, make_db(1)[0], 0.50, 0.07)[2] == 'unknown'
+    assert fc.identify_people(np.empty((0, 128)), np.array([], int), np.zeros(128), 0.5, 0.07) == (None, None, 'unknown')
+    assert fc.identify_people(None, None, np.zeros(128), 0.5, 0.07) == (None, None, 'unknown')
+
+
+def test_duplicate_person_detection_with_multi_templates():
+    people = [pose_templates(v, 4, 0.1) for v in make_db(25)]
+    matrix, starts = stack_people(people)
+    assert fc.find_duplicate_person(matrix, starts, noisy(people[7][2], 0.1), 0.5, 0.07) == 7
+    assert fc.find_duplicate_person(matrix, starts, make_db(1)[0], 0.5, 0.07) is None
+
+
+def test_capture_consistency_accepts_one_person_with_pose_changes():
+    base = make_db(1)[0]
+    shots = [base] + [noisy(base, 0.18) for _ in range(4)]
+    ok, bad, worst = fc.check_capture_consistency(shots, 0.55)
+    assert ok and bad is None and worst < 0.55
+
+
+def test_capture_consistency_catches_a_different_person_in_one_shot():
+    base = make_db(1)[0]
+    shots = [base, noisy(base, 0.15), make_db(1)[0], noisy(base, 0.15), noisy(base, 0.2)]
+    ok, bad, worst = fc.check_capture_consistency(shots, 0.55)
+    assert not ok and bad == 2 and worst > 0.55
+
+
+def test_capture_consistency_single_shot_is_trivially_fine():
+    assert fc.check_capture_consistency([make_db(1)[0]], 0.55) == (True, None, 0.0)
+
+
+def test_multi_template_matching_still_fast_at_university_scale():
+    people = [np.vstack([v] * 5) for v in make_db(4000)]     # 4,000 students x 5 templates = 20,000 rows
+    matrix, starts = stack_people(people)
+    probe = noisy(people[1234][0], 0.3)
+    t = time.perf_counter()
+    for _ in range(20):
+        idx, _, status = fc.identify_people(matrix, starts, probe, 0.5, 0.07)
+    per_call_ms = (time.perf_counter() - t) / 20 * 1000
+    assert (idx, status) == (1234, 'ok') and per_call_ms < 60, per_call_ms
+
+
+def test_capture_consistency_blames_the_right_photo_wherever_the_stranger_is():
+    base = make_db(1)[0]
+    for position in range(5):
+        shots = [noisy(base, 0.15) for _ in range(5)]
+        shots[position] = make_db(1)[0]                      # a different person in this one photo
+        ok, bad, worst = fc.check_capture_consistency(shots, 0.55)
+        assert not ok and bad == position, (position, bad)

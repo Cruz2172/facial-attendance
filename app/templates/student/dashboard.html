@@ -327,7 +327,8 @@
                 </p>
 
                 <form id="enrollForm" method="POST" action="{{ url_for('student.enroll') }}" enctype="multipart/form-data"
-                      data-capture-count="{{ enroll_capture_count }}" data-min-images="{{ enroll_min_images }}">
+                      data-capture-count="{{ enroll_capture_count }}" data-hold-count="{{ pose_hold_count }}"
+                      data-check-interval="{{ pose_check_interval_ms }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <!-- Hidden field for the captured photos (JSON array) -->
                     <input type="hidden" name="face_images" id="face_images">
@@ -405,7 +406,9 @@
                         <p class="camera-subtitle">
                             We take {{ enroll_capture_count }} photos with slightly different head positions and
                             expressions so you are recognised in different lighting and angles.
-                            Sit in good light, with only your face in view, and follow the on-screen instructions.
+                            There is no capture button: follow the on-screen instruction and hold each pose inside
+                            the oval. The camera checks your position and takes each photo by itself.
+                            Sit in good light with only your face in view.
                         </p>
 
                         <div class="video-container">

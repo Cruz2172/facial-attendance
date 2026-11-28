@@ -82,7 +82,8 @@
                 {% endwith %}
 
                 <form method="POST" action="{{ url_for('student.enroll') }}" id="enrollForm"
-                      data-capture-count="{{ enroll_capture_count }}" data-min-images="{{ enroll_min_images }}">
+                      data-capture-count="{{ enroll_capture_count }}" data-hold-count="{{ pose_hold_count }}"
+                      data-check-interval="{{ pose_check_interval_ms }}">
                     <!-- CSRF Token - Important! -->
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token else '' }}">
                     <!-- Not launched from a dashboard modal -- on success or
@@ -142,8 +143,10 @@
                         <label class="form-label fw-bold">Face Capture <span class="text-danger">*</span></label>
                         <p class="text-muted small">
                             We take <strong>{{ enroll_capture_count }} photos</strong> with slightly different head positions and
-                            expressions. This helps the system recognise you in different lighting and angles.
-                            Sit in good light, with only your face in view, and follow the instructions on screen.
+                            expressions, so the system can recognise you in different lighting and angles.
+                            There is no capture button: follow the instruction on screen and hold each pose
+                            inside the oval. The camera checks your position and takes each photo by itself.
+                            Sit in good light with only your face in view.
                         </p>
                         
                         <div class="video-container" id="videoContainer">

@@ -107,6 +107,14 @@ def detect_faces(img_rgb, upsample=1, model='hog'):
     return face_recognition.face_locations(img_rgb, number_of_times_to_upsample=upsample, model=model)
 
 
+def landmarks_for_box(img_rgb, box):
+    """dlib 68-point landmarks of the face in ``box`` as face_recognition's dict
+    (chin, nose_bridge, left_eye, ...), or None if they cannot be found."""
+    import face_recognition
+    result = face_recognition.face_landmarks(img_rgb, face_locations=[box], model='large')
+    return result[0] if result else None
+
+
 def _box_size(box):
     top, right, bottom, left = box
     return max(0, bottom - top), max(0, right - left)
@@ -176,17 +184,21 @@ class FaceGate:
             self._sem.release()
 
 
-_gate = None
+_gates = {}
 _gate_lock = threading.Lock()
 
 
-def get_gate(limit):
-    global _gate
-    if _gate is None:
+def get_gate(limit, name='default'):
+    """One gate per NAME per process. Attendance scans use 'default';
+    enrollment (live pose checks and the final photo analysis) uses 'enroll',
+    so a roomful of students enrolling cannot starve the teacher's scans."""
+    gate = _gates.get(name)
+    if gate is None:
         with _gate_lock:
-            if _gate is None:
-                _gate = FaceGate(limit)
-    return _gate
+            gate = _gates.get(name)
+            if gate is None:
+                gate = _gates[name] = FaceGate(limit)
+    return gate
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +272,10 @@ def check_capture_consistency(encodings, max_distance):
     worst = float(dist.max())
     if worst <= max_distance:
         return True, None, worst
-    return False, int(np.argmax(dist.max(axis=1))), worst
+    # The odd one out is far from MOST of the others; its mean distance is the
+    # highest. (Using each photo's single largest distance would wrongly blame a
+    # correct photo, because every correct photo is also far from the odd one.)
+    return False, int(np.argmax(dist.sum(axis=1))), worst
 
 
 # ---------------------------------------------------------------------------

@@ -12,12 +12,16 @@ import os
 os.environ.setdefault('APP_ENV', 'development')
 os.environ.setdefault('SECRET_KEY', 'test-secret-key-not-for-production')
 
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 from werkzeug.security import generate_password_hash  # noqa: E402
 
+import pose_helpers as ph  # noqa: E402
 from app import create_app  # noqa: E402
 from app import face_cache  # noqa: E402
 from app.bootstrap import init_database  # noqa: E402
@@ -28,6 +32,7 @@ from app.models import (  # noqa: E402
 )
 
 courses_mod = importlib.import_module('app.blueprints.courses')
+enrollment_mod = importlib.import_module('app.services.enrollment')
 
 
 class IntegrationConfig(Config):
@@ -337,3 +342,280 @@ def test_cache_holds_plain_records_not_orm_objects(monkeypatch):
         assert type(rec).__name__ == 'FaceRecord'
         db.session.commit()                    # a commit used to expire cached ORM objects
         assert rec.fullname                    # still readable
+
+
+# ============================================================== multi-photo enrollment
+def orthonormal(k):
+    q, _ = np.linalg.qr(np.random.default_rng(99).normal(0, 1, (128, k)))
+    return [q[:, i] for i in range(k)]
+
+
+def make_multi_student(user, sid, templates):
+    s = Student(user_id=user.id, student_id=sid, fullname=user.fullname, email=user.email,
+                course='CS', level='100',
+                face_encoding=json.dumps([np.asarray(t).tolist() for t in templates]))
+    db.session.add(s)
+    return s
+
+
+def enroll_form(images, **over):
+    data = {'student_id': 'G555', 'fullname': 'Gina', 'email': 'gina@uni.edu', 'course': 'CS',
+            'level': '100', 'consent': 'on', 'face_images': json.dumps(images)}
+    data.update(over)
+    return data
+
+
+def fake_enrollment_dlib(monkeypatch, encodings, poses=None):
+    """Fake dlib for enrollment. ``poses`` = one synth() kwargs dict per photo
+    (default: the correct guided session), or None for "no landmarks"."""
+    n = len(encodings)
+    poses = ph.GOOD_SESSION[:n] if poses is None else poses
+    seq = iter(encodings)
+    state = {'i': 0}
+
+    def landmarks(img, box):
+        i = state['i']
+        state['i'] += 1
+        scenario = poses[i]
+        if scenario is None:
+            return None
+        h, w = img.shape[:2]
+        return ph.landmarks_dict(ph.synth(w=w, h=h, **scenario))
+
+    monkeypatch.setattr(enrollment_mod, 'detect_faces',
+                        lambda img, **k: [ph.box(w=img.shape[1], h=img.shape[0])])
+    monkeypatch.setattr(enrollment_mod, 'encode_face', lambda img, box, jitters=1: next(seq))
+    monkeypatch.setattr(enrollment_mod, 'landmarks_for_box', landmarks)
+
+
+def test_five_photo_enrollment_stores_templates_and_the_student_can_be_scanned(monkeypatch):
+    app, ids = build()
+    base = np.random.default_rng(5).normal(0, 0.09, 128)
+    dirs = orthonormal(5)
+    shots = [base] + [base + 0.15 * d for d in dirs[:4]]            # 5 poses of the same person
+
+    with app.app_context():
+        gina = make_user('gina@uni.edu', 'Gina', 'student')
+        db.session.add(CourseEnrollment(student_id=gina.id, course_id=ids['course'], status='active'))
+        db.session.commit()
+        gina_id = gina.id
+
+    c = app.test_client()
+    login_as(c, gina_id, 'student')
+    fake_enrollment_dlib(monkeypatch, shots)
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 5))
+    assert r.status_code == 302, r.data[:300]
+
+    with app.app_context():
+        student = Student.query.filter_by(user_id=gina_id).first()
+        stored = json.loads(student.face_encoding)
+        assert len(stored) == 5 and len(stored[0]) == 128                # list of 5 templates
+        assert student.get_encodings().shape == (5, 128)
+        assert AuditLog.query.filter_by(action='student.face_enroll').count() == 1
+
+    # scan with a pose that is closest to the 4th template
+    teacher = app.test_client()
+    login_as(teacher, ids['teacher'], 'teacher')
+    probe = shots[3] + 0.05 * dirs[4]
+    r = scan(teacher, monkeypatch, ids['session'], probe)
+    assert r.get_json()['success'] and r.get_json()['student_name'] == 'Gina'
+
+
+def test_inconsistent_photos_are_rejected_and_nothing_is_saved(monkeypatch):
+    app, ids = build()
+    with app.app_context():
+        hana = make_user('hana@uni.edu', 'Hana', 'student')
+        db.session.commit()
+        hana_id = hana.id
+    c = app.test_client()
+    login_as(c, hana_id, 'student')
+
+    rng = np.random.default_rng(8)
+    me = rng.normal(0, 0.09, 128)
+    other = rng.normal(0, 0.09, 128)
+    d = orthonormal(1)[0]
+    fake_enrollment_dlib(monkeypatch, [me, me + 0.1 * d, other, me + 0.12 * d, me - 0.1 * d])   # photo 3 is someone else
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 5, student_id='H111', email='hana@uni.edu', fullname='Hana'))
+    assert r.status_code == 200 and b'same person' in r.data
+    with app.app_context():
+        assert Student.query.filter_by(user_id=hana_id).first() is None
+
+
+def test_too_few_photos_are_rejected(monkeypatch):
+    app, ids = build()
+    with app.app_context():
+        ivy = make_user('ivy@uni.edu', 'Ivy', 'student')
+        db.session.commit()
+        ivy_id = ivy.id
+    c = app.test_client()
+    login_as(c, ivy_id, 'student')
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 4, student_id='I222', email='ivy@uni.edu'))
+    assert b'at least 5' in r.data
+    with app.app_context():
+        assert Student.query.filter_by(user_id=ivy_id).first() is None
+
+
+def test_enrolling_with_someone_elses_face_is_refused_without_leaking_who(monkeypatch):
+    app, ids = build()
+    with app.app_context():
+        jon = make_user('jon@uni.edu', 'Jon', 'student')
+        db.session.commit()
+        jon_id = jon.id
+    c = app.test_client()
+    login_as(c, jon_id, 'student')
+    fake_enrollment_dlib(monkeypatch, [ENC['alice']] * 5)                # Jon presents Alice's face
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 5, student_id='J333', email='jon@uni.edu', fullname='Jon'))
+    assert b'already registered' in r.data
+    assert b'Alice' not in r.data and b'A001' not in r.data
+    with app.app_context():
+        assert Student.query.filter_by(user_id=jon_id).first() is None
+
+
+def test_a_pose_template_matches_when_the_frontal_photo_alone_would_not(monkeypatch):
+    app, ids = build()
+    front_dir, jitter_dir = orthonormal(2)
+    frontal = np.random.default_rng(21).normal(0, 0.09, 128)
+    turned = frontal + 0.55 * front_dir
+    probe = turned + 0.10 * jitter_dir
+    assert np.linalg.norm(probe - frontal) > 0.50
+
+    with app.app_context():
+        kim = make_user('kim@uni.edu', 'Kim', 'student')
+        db.session.add(CourseEnrollment(student_id=kim.id, course_id=ids['course'], status='active'))
+        make_multi_student(kim, 'K444', [frontal, turned])
+        db.session.commit()
+        face_cache.invalidate_face_cache()
+
+    c = app.test_client()
+    login_as(c, ids['teacher'], 'teacher')
+    r = scan(c, monkeypatch, ids['session'], probe)
+    assert r.get_json()['success'] and r.get_json()['student_name'] == 'Kim'
+
+
+def test_many_templates_of_one_person_never_cause_an_ambiguous_result(monkeypatch):
+    app, ids = build()
+    dirs = orthonormal(6)
+    base = np.random.default_rng(31).normal(0, 0.09, 128)
+    templates = [base] + [base + 0.06 * d for d in dirs[:5]]            # 6 near-identical photos
+
+    with app.app_context():
+        lee = make_user('lee@uni.edu', 'Lee', 'student')
+        db.session.add(CourseEnrollment(student_id=lee.id, course_id=ids['course'], status='active'))
+        make_multi_student(lee, 'L666', templates)
+        db.session.commit()
+        face_cache.invalidate_face_cache()
+
+    c = app.test_client()
+    login_as(c, ids['teacher'], 'teacher')
+    body = scan(c, monkeypatch, ids['session'], base + 0.12 * dirs[5]).get_json()
+    assert body['success'] and body['student_name'] == 'Lee' and not body.get('ambiguous')
+
+
+def test_legacy_single_encoding_students_still_work_next_to_multi_template_students(monkeypatch):
+    app, ids = build()                                                   # Alice/Bob are legacy 1-D encodings
+    base = np.random.default_rng(41).normal(0, 0.09, 128)
+    with app.app_context():
+        mo = make_user('mo@uni.edu', 'Mo', 'student')
+        db.session.add(CourseEnrollment(student_id=mo.id, course_id=ids['course'], status='active'))
+        make_multi_student(mo, 'M777', [base, base + 0.2 * orthonormal(1)[0]])
+        db.session.commit()
+        face_cache.invalidate_face_cache()
+        state = face_cache.get_state()
+        assert len(state.records) == 4                       # Alice, Bob, Carol (1 template each) + Mo
+        assert len(state.matrix) == 3 + 2                    # 3 legacy rows + Mo's 2 templates
+
+    c = app.test_client()
+    login_as(c, ids['teacher'], 'teacher')
+    assert scan(c, monkeypatch, ids['session'], ENC['alice']).get_json()['student_name'] == 'Alice'
+    assert scan(c, monkeypatch, ids['session'], base).get_json()['student_name'] == 'Mo'
+
+
+# ============================================================ mandatory poses
+def make_student_user(app, email, name):
+    with app.app_context():
+        u = make_user(email, name, 'student')
+        db.session.commit()
+        return u.id
+
+
+def test_the_server_refuses_photos_that_do_not_show_the_required_poses(monkeypatch):
+    app, ids = build()
+    nia = make_student_user(app, 'nia@uni.edu', 'Nia')
+    c = app.test_client()
+    login_as(c, nia, 'student')
+    base = np.random.default_rng(61).normal(0, 0.09, 128)
+    shots = [base + 0.1 * d for d in orthonormal(5)]
+
+    # the "cheat": five straight-on photos, no turning, no smile
+    fake_enrollment_dlib(monkeypatch, shots, poses=[{}] * 5)
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 5, student_id='N888', email='nia@uni.edu', fullname='Nia'))
+    assert r.status_code == 200 and b'Photo 2' in r.data and b'turn left' in r.data
+    with app.app_context():
+        assert Student.query.filter_by(user_id=nia).first() is None
+
+    # the same five photos, now genuinely in the required poses, are accepted
+    fake_enrollment_dlib(monkeypatch, shots)
+    r = c.post('/enroll', data=enroll_form([DATA_URL] * 5, student_id='N888', email='nia@uni.edu', fullname='Nia'))
+    assert r.status_code == 302
+    with app.app_context():
+        assert Student.query.filter_by(user_id=nia).first() is not None
+
+
+def pose_check(client, monkeypatch, pose_index, scenario, baseline=None):
+    h = {'n': 0}
+    monkeypatch.setattr(enrollment_mod, 'detect_faces',
+                        lambda img, **k: [ph.box(w=img.shape[1], h=img.shape[0])])
+    monkeypatch.setattr(enrollment_mod, 'landmarks_for_box',
+                        lambda img, box: ph.landmarks_dict(ph.synth(w=img.shape[1], h=img.shape[0], **scenario)))
+    return client.post('/enroll/pose-check',
+                       json={'image': DATA_URL, 'pose_index': pose_index, 'baseline': baseline})
+
+
+def test_pose_check_route_guides_the_student_through_the_poses(monkeypatch):
+    app, ids = build()
+    oli = make_student_user(app, 'oli@uni.edu', 'Oli')
+    c = app.test_client()
+    login_as(c, oli, 'student')
+
+    r = pose_check(c, monkeypatch, 0, {})
+    body = r.get_json()
+    assert r.status_code == 200 and body['success'] and body['ok'] and body['baseline']
+    base = body['baseline']
+
+    assert pose_check(c, monkeypatch, 1, {'yaw_left': 22}, base).get_json()['ok'] is True
+    wrong = pose_check(c, monkeypatch, 1, {'yaw_left': -22}, base).get_json()
+    assert wrong['ok'] is False and wrong['code'] == 'wrong_way' and 'left' in wrong['message']
+    assert pose_check(c, monkeypatch, 4, {}, base).get_json()['code'] == 'smile'
+    assert pose_check(c, monkeypatch, 1, {'yaw_left': 22}, None).get_json()['code'] == 'need_baseline'
+
+
+def test_pose_check_route_is_for_logged_in_students_only(monkeypatch):
+    app, ids = build()
+    anon = app.test_client()
+    r = anon.post('/enroll/pose-check', json={'image': DATA_URL, 'pose_index': 0})
+    assert r.status_code == 401 and r.get_json()['login_required'] is True
+
+    teacher = app.test_client()
+    login_as(teacher, ids['teacher'], 'teacher')
+    assert teacher.post('/enroll/pose-check', json={'image': DATA_URL, 'pose_index': 0}).status_code == 403
+
+
+def test_pose_check_route_validates_its_input_and_reports_a_busy_server(monkeypatch):
+    app, ids = build()
+    pam = make_student_user(app, 'pam@uni.edu', 'Pam')
+    c = app.test_client()
+    login_as(c, pam, 'student')
+
+    assert c.post('/enroll/pose-check', data='not json', content_type='text/plain').status_code in (400, 401)
+    assert c.post('/enroll/pose-check', json={'pose_index': 0}).status_code == 400            # no image
+    assert c.post('/enroll/pose-check', json={'image': DATA_URL, 'pose_index': 99}).status_code == 400
+    assert c.post('/enroll/pose-check', json={'image': 'nope', 'pose_index': 0}).status_code == 400
+
+    class BusyGate:
+        def slot(self, timeout=0):
+            from app.face_core import FaceBusy
+            raise FaceBusy()
+
+    monkeypatch.setattr(enrollment_mod, 'get_gate', lambda *a, **k: BusyGate())
+    r = c.post('/enroll/pose-check', json={'image': DATA_URL, 'pose_index': 0})
+    assert r.status_code == 503 and r.get_json()['busy'] is True

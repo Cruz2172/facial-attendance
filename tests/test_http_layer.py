@@ -78,6 +78,18 @@ def test_fetch_header_makes_any_route_answer_in_json():
     assert r.status_code == 401 and r.get_json()['success'] is False
 
 
+def test_pose_check_route_needs_a_login_and_answers_scripts_in_json():
+    _, c = make_client()
+    r = c.post('/enroll/pose-check', json={'image': 'x', 'pose_index': 0})
+    assert r.status_code == 401
+    assert r.get_json()['login_required'] is True
+
+
+def test_pose_check_route_only_accepts_post():
+    _, c = make_client()
+    assert c.get('/enroll/pose-check').status_code == 405
+
+
 def test_retired_recognize_face_requires_login_first():
     _, c = make_client()
     assert c.post('/recognize_face', json={'image': 'x'}).status_code == 401

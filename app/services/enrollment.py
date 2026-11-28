@@ -10,7 +10,11 @@ from sqlalchemy import func
 
 from ..face_core import (
     FaceBusy, FaceInputError, check_capture_consistency, decode_data_url,
-    detect_faces, encode_face, get_gate, parse_encodings, select_primary_face,
+    detect_faces, downscale, encode_face, get_gate, landmarks_for_box,
+    parse_encodings, select_primary_face,
+)
+from ..pose_core import (
+    POSE_KEYS, Tuning, baseline_from, clean_baseline, evaluate_pose, key_points, measure,
 )
 from ..models import Student
 from ..timeutil import utcnow
@@ -168,6 +172,105 @@ def detect_single_face(img_rgb):
         raise EnrollmentError('Error detecting face. Please retake the photo with better lighting.')
 
 
+POSE_LABELS = ('straight', 'turn left', 'turn right', 'chin up', 'smile', 'move closer', 'chin down')
+
+
+def pose_tuning(slack=0.0):
+    """Pose thresholds from configuration (optionally loosened for the final re-check)."""
+    cfg = current_app.config
+    tuning = Tuning(
+        straight_max_yaw=cfg['POSE_STRAIGHT_MAX_YAW'],
+        turn_min=cfg['POSE_TURN_MIN'], turn_max=cfg['POSE_TURN_MAX'],
+        pitch_min=cfg['POSE_PITCH_MIN'], pitch_max=cfg['POSE_PITCH_MAX'],
+        smile_min_increase=cfg['POSE_SMILE_INCREASE'],
+    )
+    return tuning.with_slack(slack)
+
+
+def _measure_photo(img_rgb):
+    """(metrics, status). Caller must hold an enrollment gate slot.
+
+    status is 'ok' | 'no_face' | 'too_small' | 'multiple' | 'no_landmarks'."""
+    cfg = current_app.config
+    boxes = detect_faces(img_rgb)
+    box, status = select_primary_face(boxes, min_size=cfg['POSE_MIN_FACE_PX'], ratio=float('inf'))
+    if box is None:
+        return None, status
+    points = key_points(landmarks_for_box(img_rgb, box))
+    height, width = img_rgb.shape[:2]
+    metrics = measure(points, box, width, height) if points else None
+    return (metrics, 'ok') if metrics else (None, 'no_landmarks')
+
+
+_STATUS_MESSAGES = {
+    'no_face': ('no_face', 'No face detected. Look at the camera.'),
+    'too_small': ('too_far', 'Move closer to the camera.'),
+    'multiple': ('multiple', 'Only one person should be in the frame.'),
+    'no_landmarks': ('no_landmarks', "Can't see your face clearly. Improve the lighting."),
+}
+
+
+def check_pose_frame(data_url, pose_index, baseline_raw):
+    """Live guidance for ONE camera frame.
+
+    Returns ``{'ok', 'code', 'message', 'baseline'}``. ``baseline`` is only set
+    when the straight photo (pose 0) is approved; the browser sends it back with
+    later frames. It is advisory: the final re-check recomputes it from photo 1.
+    Raises EnrollmentError for unusable input and FaceBusy when the server is saturated.
+    """
+    cfg = current_app.config
+    if isinstance(pose_index, bool) or not isinstance(pose_index, int) \
+            or not 0 <= pose_index < min(len(POSE_KEYS), cfg['ENROLL_MAX_IMAGES']):
+        raise EnrollmentError('Unknown pose.')
+
+    baseline = clean_baseline(baseline_raw)
+    if pose_index > 0 and baseline is None:
+        return {'ok': False, 'code': 'need_baseline', 'baseline': None,
+                'message': 'Take the first (straight) photo before this one.'}
+
+    if not isinstance(data_url, str) or not data_url.startswith('data:image/'):
+        raise EnrollmentError('Invalid image data.')
+    try:
+        _bgr, rgb = decode_data_url(data_url, max_pixels=cfg['FACE_MAX_IMAGE_PIXELS'],
+                                    max_dim=cfg['POSE_CHECK_MAX_DIM'])
+    except FaceInputError as exc:
+        raise EnrollmentError(str(exc))
+
+    with get_gate(cfg['ENROLL_MAX_CONCURRENT'], 'enroll').slot(timeout=cfg['POSE_QUEUE_TIMEOUT']):
+        metrics, status = _measure_photo(rgb)
+
+    if metrics is None:
+        code, message = _STATUS_MESSAGES[status]
+        return {'ok': False, 'code': code, 'message': message, 'baseline': None}
+
+    result = evaluate_pose(pose_index, metrics, baseline, pose_tuning())
+    return {
+        'ok': result.ok, 'code': result.code, 'message': result.message,
+        'baseline': baseline_from(metrics) if (result.ok and pose_index == 0) else None,
+    }
+
+
+def _verify_poses(pose_metrics):
+    """Re-check every submitted photo against the pose it was meant to show.
+
+    ``pose_metrics[i]`` are the server-side measurements of photo i (or None).
+    Photo 1 must be straight; every other photo is judged against photo 1's own
+    numbers. Uses a slightly looser tolerance than the live check because the
+    stored photo is a different size from the frame that was approved."""
+    tuning = pose_tuning(current_app.config['POSE_FINAL_SLACK_DEG'])
+    baseline = None
+    for index, metrics in enumerate(pose_metrics):
+        number, label = index + 1, POSE_LABELS[index]
+        if metrics is None:
+            raise EnrollmentError(f'Photo {number} ({label}): could not check your head position. '
+                                  f'Retake it in better light, facing the camera.')
+        result = evaluate_pose(index, metrics, baseline, tuning)
+        if not result.ok:
+            raise EnrollmentError(f'Photo {number} ({label}): {result.message}')
+        if index == 0:
+            baseline = baseline_from(metrics)
+
+
 def encode_enrollment_images(face_images):
     """Turn the captured photos into face templates.
 
@@ -185,16 +288,21 @@ def encode_enrollment_images(face_images):
         except EnrollmentError as exc:
             raise EnrollmentError(f'Photo {number}: {exc}')
 
-    encodings = []
+    encodings, pose_metrics = [], []
     try:
         # ONE concurrency slot for the whole batch, so a single student cannot
         # hold several slots at once and starve everyone else.
-        with get_gate(cfg['FACE_MAX_CONCURRENT']).slot(timeout=cfg['FACE_QUEUE_TIMEOUT'] * 2):
+        with get_gate(cfg['ENROLL_MAX_CONCURRENT'], 'enroll').slot(timeout=cfg['FACE_QUEUE_TIMEOUT'] * 2):
             for number, (_bgr, rgb) in enumerate(decoded, start=1):
                 try:
                     encodings.append(_single_face_encoding(rgb, cfg['FACE_ENROLL_JITTERS']))
                 except EnrollmentError as exc:
                     raise EnrollmentError(f'Photo {number}: {exc}')
+
+            # Second pass: where was the head in each photo? (same frame size the live check used)
+            for _bgr, rgb in decoded:
+                small = downscale(rgb, cfg['POSE_CHECK_MAX_DIM'])
+                pose_metrics.append(_measure_photo(small)[0])
     except FaceBusy:
         raise EnrollmentError('The server is busy right now. Please try again in a moment.')
     except FaceInputError as exc:
@@ -212,6 +320,8 @@ def encode_enrollment_images(face_images):
         raise EnrollmentError(
             f'❌ Photo {bad_index + 1} does not seem to show the same person as the others. '
             f'Make sure only you are in front of the camera, then retake the photos.')
+
+    _verify_poses(pose_metrics)       # every photo must really show its required pose
 
     return encodings, decoded[0][0]
 

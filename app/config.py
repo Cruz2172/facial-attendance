@@ -42,7 +42,7 @@ def _normalise_db_url(url):
 # Multi-image enrollment: the capture page guides the student through
 # ENROLL_CAPTURE_COUNT poses; the server needs at least ENROLL_MIN_IMAGES good
 # photos and accepts at most ENROLL_MAX_IMAGES (7 = number of guided poses).
-_ENROLL_MIN = max(1, _env_int('ENROLL_MIN_IMAGES', 3))
+_ENROLL_MIN = max(1, _env_int('ENROLL_MIN_IMAGES', 5))
 _ENROLL_MAX = max(_ENROLL_MIN, min(7, _env_int('ENROLL_MAX_IMAGES', 7)))
 _ENROLL_COUNT = min(max(_env_int('ENROLL_CAPTURE_COUNT', 5), _ENROLL_MIN), _ENROLL_MAX)
 
@@ -146,6 +146,26 @@ class Config:
     # All enrollment photos must show the same person: reject if any two are
     # further apart than this (same person, different pose ~0.2-0.45; different person > 0.6).
     ENROLL_CONSISTENCY_MAX = _env_float('ENROLL_CONSISTENCY_MAX', 0.55)
+
+    # ---- Guided capture: the student must actually hold each pose -------------------
+    # The browser asks the server to check frames (about 2 per second); a photo is
+    # taken automatically only after POSE_HOLD_COUNT consecutive good checks, and the
+    # server re-checks every submitted photo, so the rules cannot be skipped.
+    POSE_CHECK_RATE_LIMIT = os.environ.get('POSE_CHECK_RATE_LIMIT', '200 per minute')
+    POSE_CHECK_MAX_DIM = _env_int('POSE_CHECK_MAX_DIM', 640)       # frame size analysed (also used for the final re-check)
+    POSE_CHECK_INTERVAL_MS = _env_int('POSE_CHECK_INTERVAL_MS', 450)
+    POSE_HOLD_COUNT = max(1, _env_int('POSE_HOLD_COUNT', 3))       # consecutive good checks before auto-capture
+    POSE_MIN_FACE_PX = _env_int('POSE_MIN_FACE_PX', 40)
+    POSE_QUEUE_TIMEOUT = _env_float('POSE_QUEUE_TIMEOUT', 1.5)
+    ENROLL_MAX_CONCURRENT = _env_int('ENROLL_MAX_CONCURRENT', 2)   # enrollment face jobs per worker
+    POSE_FINAL_SLACK_DEG = _env_float('POSE_FINAL_SLACK_DEG', 4.0) # extra tolerance on the final server re-check
+    # Thresholds (equivalent degrees; see app/pose_core.py). Tune with real students.
+    POSE_STRAIGHT_MAX_YAW = _env_float('POSE_STRAIGHT_MAX_YAW', 10.0)
+    POSE_TURN_MIN = _env_float('POSE_TURN_MIN', 12.0)
+    POSE_TURN_MAX = _env_float('POSE_TURN_MAX', 38.0)
+    POSE_PITCH_MIN = _env_float('POSE_PITCH_MIN', 8.0)
+    POSE_PITCH_MAX = _env_float('POSE_PITCH_MAX', 30.0)
+    POSE_SMILE_INCREASE = _env_float('POSE_SMILE_INCREASE', 0.08)
     # Max simultaneous dlib jobs per worker; the rest wait, then get a
     # "server busy, retrying" response instead of exhausting CPU/RAM.
     FACE_MAX_CONCURRENT = _env_int('FACE_MAX_CONCURRENT', 2)
